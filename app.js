@@ -1,0 +1,551 @@
+/* =========================================================
+   BIG BOSS COMMAND CENTER — app.js
+   Architecture: single state store → actions mutate state →
+   commit() persists + re-renders every component.
+   ========================================================= */
+
+const STORAGE_KEY = 'bigboss-command-center-v1';
+const TEAM_COLORS = { Alpha: '#7c5cff', Beta: '#00d4ff', Gamma: '#22e39b', Delta: '#ff8a3d' };
+
+/* ---------------- Seed data ---------------- */
+function seedState() {
+  const seed = [
+    ['Aarav', 'Alpha', 850], ['Riya', 'Alpha', 720], ['Kabir', 'Beta', 680], ['Ananya', 'Beta', 610],
+    ['Vihaan', 'Gamma', 560], ['Meera', 'Gamma', 490], ['Arjun', 'Delta', 430], ['Tara', 'Delta', 390],
+  ];
+  return {
+    nextId: seed.length + 1,
+    contestants: seed.map(([name, team, points], i) => ({
+      id: i + 1, name, team, points, captain: false, immune: false, nominated: false, evicted: false,
+    })),
+    tasks: [
+      { id: 1, title: 'Debug the Mainframe', assignee: 't:Alpha', reward: 100, done: false, createdAt: Date.now() },
+      { id: 2, title: 'Hackathon Sprint', assignee: 'c:3', reward: 75, done: false, createdAt: Date.now() },
+    ],
+    nextTaskId: 3,
+    announcements: [],
+    activity: [{ text: 'Command Center online. Tech House is LIVE.', time: Date.now() }],
+    evictions: [],
+    timer: { duration: 300, remaining: 300, status: 'ready', taskId: null },
+  };
+}
+
+let state = load();
+let timerInterval = null;
+let prevPoints = {};
+
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    if (s && s.contestants) {
+      if (s.timer.status === 'running') s.timer.status = 'paused'; // resume safely after reload
+      return s;
+    }
+  } catch (e) { /* ignore */ }
+  return seedState();
+}
+function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+
+/* ---------------- Helpers ---------------- */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const byId = (id) => state.contestants.find((c) => c.id === Number(id));
+const active = () => state.contestants.filter((c) => !c.evicted);
+const captain = () => state.contestants.find((c) => c.captain && !c.evicted);
+const ranked = () => [...active()].sort((a, b) => b.points - a.points || a.name.localeCompare(b.name));
+const teams = () => [...new Set(state.contestants.map((c) => c.team))];
+const fmtTime = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const teamColor = (t) => TEAM_COLORS[t] || '#c45cff';
+const teamTag = (t) => `<span class="team" style="background:${teamColor(t)}22;color:${teamColor(t)}">${esc(t)}</span>`;
+
+function primaryStatus(c) {
+  if (c.evicted) return 'Evicted';
+  if (c.captain) return 'Captain';
+  if (c.nominated) return 'Nominated';
+  if (c.immune) return 'Immune';
+  return 'Active';
+}
+function badges(c) {
+  if (c.evicted) return '<span class="badge b-evicted">🚪 Evicted</span>';
+  let b = '';
+  if (c.captain) b += '<span class="badge b-captain">👑 Captain</span>';
+  if (c.immune) b += '<span class="badge b-immune">🛡 Immune</span>';
+  if (c.nominated) b += '<span class="badge b-nominated">🎯 Nominated</span>';
+  if (!b) b = '<span class="badge b-active">● Active</span>';
+  return b;
+}
+
+function log(text) {
+  state.activity.unshift({ text, time: Date.now() });
+  state.activity = state.activity.slice(0, 60);
+  $('tickerInner').textContent = '🔴 LIVE · ' + text;
+}
+function toast(msg, type = '') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  $('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+function commit() { save(); render(); }
+
+function guardActive(c, action) {
+  if (!c) { toast('Select a contestant first.', 'error'); return false; }
+  if (c.evicted) { toast(`${c.name} is evicted — cannot ${action}.`, 'error'); return false; }
+  return true;
+}
+
+/* ---------------- Actions ---------------- */
+const Actions = {
+  addContestant(name, team, points) {
+    name = name.trim(); team = team.trim();
+    if (!name || !team) return;
+    if (state.contestants.some((c) => c.name.toLowerCase() === name.toLowerCase() && !c.evicted)) {
+      return toast('A contestant with that name is already in the house.', 'error');
+    }
+    state.contestants.push({ id: state.nextId++, name, team, points: Number(points) || 0, captain: false, immune: false, nominated: false, evicted: false });
+    log(`${name} entered the house (Team ${team}).`);
+    toast(`${name} added to the house`, 'success');
+    commit();
+  },
+
+  changePoints(id, delta) {
+    const c = byId(id);
+    if (!guardActive(c, 'receive points')) return;
+    delta = Number(delta);
+    if (!delta) return toast('Enter a valid amount.', 'error');
+    c.points = Math.max(0, c.points + delta);
+    log(`${delta > 0 ? '+' : ''}${delta} points ${delta > 0 ? 'to' : 'from'} ${c.name} (now ${c.points}).`);
+    toast(`${c.name}: ${delta > 0 ? '+' : ''}${delta} pts`, delta > 0 ? 'success' : 'error');
+    commit();
+  },
+
+  setCaptain(id) {
+    const c = byId(id);
+    if (!guardActive(c, 'become Captain')) return;
+    if (c.captain) return toast(`${c.name} is already Captain.`);
+    const prev = captain();
+    state.contestants.forEach((x) => (x.captain = false)); // only one captain
+    c.captain = true;
+    log(prev ? `Captaincy transferred: ${prev.name} → ${c.name}.` : `${c.name} is the new House Captain.`);
+    toast(`👑 ${c.name} is now House Captain`, 'gold');
+    commit();
+  },
+  removeCaptain() {
+    const c = captain();
+    if (!c) return toast('There is no Captain right now.', 'error');
+    c.captain = false;
+    log(`${c.name} was removed from captaincy.`);
+    commit();
+  },
+
+  nominate(id) {
+    const c = byId(id);
+    if (!guardActive(c, 'be nominated')) return;
+    if (c.immune) return toast(`🛡 ${c.name} has immunity and cannot be nominated!`, 'error');
+    if (c.nominated) return toast(`${c.name} is already nominated.`);
+    c.nominated = true;
+    log(`${c.name} has been NOMINATED for eviction.`);
+    toast(`🎯 ${c.name} nominated`, 'error');
+    commit();
+  },
+  cancelNomination(id) {
+    const c = byId(id);
+    if (!c || !c.nominated) return toast('That contestant is not nominated.', 'error');
+    c.nominated = false;
+    log(`Nomination cancelled for ${c.name}.`);
+    toast(`${c.name} is safe`, 'success');
+    commit();
+  },
+
+  grantImmunity(id) {
+    const c = byId(id);
+    if (!guardActive(c, 'receive immunity')) return;
+    if (c.immune) return toast(`${c.name} is already immune.`);
+    c.immune = true;
+    let msg = `${c.name} has been granted IMMUNITY.`;
+    if (c.nominated) { c.nominated = false; msg += ' Nomination voided.'; }
+    log(msg);
+    toast(`🛡 ${c.name} is immune`, 'success');
+    commit();
+  },
+  revokeImmunity(id) {
+    const c = byId(id);
+    if (!c || !c.immune) return toast('That contestant is not immune.', 'error');
+    c.immune = false;
+    log(`Immunity revoked from ${c.name}.`);
+    commit();
+  },
+
+  evict(id) {
+    const c = byId(id);
+    if (!guardActive(c, 'be evicted')) return;
+    if (!confirm(`Big Boss, confirm eviction of ${c.name}?`)) return;
+    const wasCaptain = c.captain;
+    Object.assign(c, { evicted: true, captain: false, nominated: false, immune: false });
+    state.evictions.unshift({ id: c.id, name: c.name, team: c.team, points: c.points, wasCaptain, time: Date.now() });
+    // Remove pending individual tasks of evicted contestant
+    state.tasks = state.tasks.filter((t) => t.done || t.assignee !== 'c:' + c.id);
+    log(`🚪 ${c.name} has been EVICTED from the Tech House.`);
+    toast(`🚪 ${c.name} evicted`, 'error');
+    commit();
+  },
+
+  createTask(title, assignee, reward) {
+    title = title.trim();
+    if (!title || !assignee) return toast('Task name and assignee required.', 'error');
+    if (assignee.startsWith('c:') && !guardActive(byId(assignee.slice(2)), 'receive tasks')) return;
+    state.tasks.unshift({ id: state.nextTaskId++, title, assignee, reward: Math.max(0, Number(reward) || 0), done: false, createdAt: Date.now() });
+    log(`New task "${title}" assigned to ${assigneeLabel(assignee)}.`);
+    toast('📋 Task assigned', 'success');
+    commit();
+  },
+  completeTask(id) {
+    const t = state.tasks.find((x) => x.id === id);
+    if (!t || t.done) return;
+    t.done = true; t.completedAt = Date.now();
+    const winners = t.assignee.startsWith('t:')
+      ? active().filter((c) => c.team === t.assignee.slice(2))
+      : [byId(t.assignee.slice(2))].filter((c) => c && !c.evicted);
+    winners.forEach((c) => (c.points += t.reward));
+    if (state.timer.taskId === id) Timer.reset();
+    log(`✅ Task "${t.title}" completed by ${assigneeLabel(t.assignee)}${t.reward ? ` (+${t.reward} pts each)` : ''}.`);
+    toast(`✅ "${t.title}" completed`, 'success');
+    commit();
+  },
+  deleteTask(id) {
+    state.tasks = state.tasks.filter((t) => t.id !== id);
+    if (state.timer.taskId === id) state.timer.taskId = null;
+    commit();
+  },
+
+  broadcast(text) {
+    text = text.trim();
+    if (!text) return toast('Type an announcement first.', 'error');
+    state.announcements.unshift({ text, time: Date.now() });
+    log(`📢 Big Boss broadcast: "${text}"`);
+    commit();
+    showBroadcast(text);
+  },
+};
+
+function assigneeLabel(a) {
+  if (a.startsWith('t:')) return `Team ${a.slice(2)}`;
+  const c = byId(a.slice(2));
+  return c ? c.name : 'Unknown';
+}
+
+/* ---------------- Timer ---------------- */
+const Timer = {
+  start() {
+    const t = state.timer;
+    if (t.status === 'running') return;
+    if (t.status === 'finished' || t.status === 'ready') {
+      const mins = Math.max(1, Math.min(99, Number($('timerMinutes').value) || 5));
+      if (t.status === 'finished' || t.remaining === t.duration) { t.duration = mins * 60; t.remaining = t.duration; }
+    }
+    t.status = 'running';
+    log(`⏱ Task timer started (${fmtClock(t.remaining)} left).`);
+    this.tick();
+    commit();
+  },
+  tick() {
+    clearInterval(timerInterval);
+    timerInterval = setInterval(() => {
+      const t = state.timer;
+      t.remaining = Math.max(0, t.remaining - 1);
+      if (t.remaining === 0) {
+        clearInterval(timerInterval);
+        t.status = 'finished';
+        log('⏰ TIME UP! Task timer finished.');
+        toast('⏰ Time is up!', 'error');
+        commit();
+      } else { save(); renderTimer(); }
+    }, 1000);
+  },
+  pause() {
+    if (state.timer.status !== 'running') return toast('Timer is not running.', 'error');
+    clearInterval(timerInterval);
+    state.timer.status = 'paused';
+    log('⏸ Task timer paused.');
+    commit();
+  },
+  reset() {
+    clearInterval(timerInterval);
+    const mins = Math.max(1, Math.min(99, Number($('timerMinutes').value) || 5));
+    Object.assign(state.timer, { duration: mins * 60, remaining: mins * 60, status: 'ready' });
+    save(); renderTimer();
+  },
+  linkTask(id) {
+    state.timer.taskId = id;
+    const t = state.tasks.find((x) => x.id === id);
+    this.reset();
+    toast(`⏱ Timer linked to "${t.title}"`);
+    commit();
+    $('timerCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  },
+};
+const fmtClock = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+/* ---------------- Broadcast overlay ---------------- */
+let broadcastTimeout;
+function showBroadcast(text) {
+  $('broadcastText').textContent = text;
+  $('broadcastOverlay').classList.add('show');
+  clearTimeout(broadcastTimeout);
+  broadcastTimeout = setTimeout(hideBroadcast, 7000);
+}
+function hideBroadcast() { $('broadcastOverlay').classList.remove('show'); }
+
+/* ---------------- Rendering ---------------- */
+function render() {
+  renderHeader();
+  renderLeaderboard();
+  renderContestants();
+  renderTasks();
+  renderSelects();
+  renderDangerZone();
+  renderStats();
+  renderTimer();
+  renderFeeds();
+  prevPoints = Object.fromEntries(state.contestants.map((c) => [c.id, c.points]));
+}
+
+function renderHeader() {
+  const cap = captain();
+  $('hActive').textContent = active().length;
+  $('hCaptain').textContent = cap ? cap.name : 'None';
+  $('captainCurrent').textContent = cap ? `${cap.name} (Team ${cap.team})` : 'None';
+  const last = state.announcements[0];
+  const hb = $('hBroadcast');
+  const recent = last && Date.now() - last.time < 60000;
+  hb.classList.toggle('on', !!recent);
+  hb.textContent = last ? `📡 ${recent ? 'ON AIR' : 'Last'}: ${last.text.slice(0, 28)}${last.text.length > 28 ? '…' : ''}` : '📡 No broadcast';
+}
+
+function renderLeaderboard() {
+  const list = ranked();
+  const max = Math.max(1, ...list.map((c) => c.points));
+  $('leaderboard').innerHTML = list.length ? list.map((c, i) => {
+    const prev = prevPoints[c.id];
+    const flash = prev === undefined || prev === c.points ? '' : c.points > prev ? 'flash-up' : 'flash-down';
+    const cls = [c.captain && 'captain', c.nominated && 'nominated', c.immune && 'immune', flash].filter(Boolean).join(' ');
+    return `<li class="lb-item ${cls}">
+      <div class="lb-rank">${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i + 1)}</div>
+      <div><div class="lb-name">${c.captain ? '👑 ' : ''}${esc(c.name)} ${badges(c)}</div>
+        <div class="lb-bar"><div style="width:${(c.points / max) * 100}%"></div></div></div>
+      <div class="lb-team">${teamTag(c.team)}</div>
+      <div class="lb-points">${c.points}</div>
+    </li>`;
+  }).join('') : '<li class="empty">No active contestants.</li>';
+}
+
+function renderContestants() {
+  const list = [...state.contestants].sort((a, b) => a.evicted - b.evicted || b.points - a.points);
+  $('contestantCount').textContent = `${active().length} active / ${state.contestants.length} total`;
+  $('contestantTable').innerHTML = list.map((c) => {
+    const acts = c.evicted ? '<span class="t-meta">No actions — evicted</span>' : `
+      <button class="btn btn-green xs" data-act="pts" data-id="${c.id}" data-v="50">+50</button>
+      <button class="btn btn-red xs" data-act="pts" data-id="${c.id}" data-v="-50">−50</button>
+      <button class="btn btn-gold xs" data-act="cap" data-id="${c.id}" ${c.captain ? 'disabled' : ''}>👑</button>
+      ${c.nominated
+        ? `<button class="btn btn-ghost xs" data-act="unnom" data-id="${c.id}">Un-nominate</button>`
+        : `<button class="btn btn-red xs" data-act="nom" data-id="${c.id}" ${c.immune ? 'disabled title="Immune — cannot nominate"' : ''}>🎯</button>`}
+      ${c.immune
+        ? `<button class="btn btn-ghost xs" data-act="unimm" data-id="${c.id}">−🛡</button>`
+        : `<button class="btn btn-green xs" data-act="imm" data-id="${c.id}">🛡</button>`}
+      <button class="btn btn-ghost xs" data-act="evict" data-id="${c.id}">🚪</button>`;
+    return `<tr class="${c.evicted ? 'evicted' : ''} ${c.captain ? 'captain' : ''}">
+      <td>${c.captain ? '👑 ' : ''}${esc(c.name)}</td><td>${teamTag(c.team)}</td>
+      <td><strong>${c.points}</strong></td><td title="${primaryStatus(c)}">${badges(c)}</td>
+      <td><div class="actions">${acts}</div></td></tr>`;
+  }).join('');
+  $('teamList').innerHTML = teams().map((t) => `<option value="${esc(t)}">`).join('');
+}
+
+function renderTasks() {
+  const act = state.tasks.filter((t) => !t.done);
+  const done = state.tasks.filter((t) => t.done).sort((a, b) => b.completedAt - a.completedAt);
+  $('taskCount').textContent = `${act.length} active · ${done.length} done`;
+  $('activeTasks').innerHTML = act.length ? act.map((t) => `
+    <li class="${state.timer.taskId === t.id ? 'timed' : ''}">
+      <div><div class="t-title">${esc(t.title)}</div>
+      <div class="t-meta">→ ${esc(assigneeLabel(t.assignee))} · 🏅 ${t.reward} pts</div></div>
+      <div class="actions">
+        <button class="btn btn-ghost xs" data-task="timer" data-id="${t.id}" title="Link timer">⏱</button>
+        <button class="btn btn-green xs" data-task="done" data-id="${t.id}">✓ Done</button>
+        <button class="btn btn-ghost xs" data-task="del" data-id="${t.id}" title="Delete">✕</button>
+      </div></li>`).join('') : '<li class="empty">No active tasks.</li>';
+  $('completedTasks').innerHTML = done.length ? done.map((t) => `
+    <li><div><div class="t-title">${esc(t.title)}</div>
+    <div class="t-meta">${esc(assigneeLabel(t.assignee))} · +${t.reward} · ${fmtTime(t.completedAt)}</div></div><span>✅</span></li>`).join('')
+    : '<li class="empty">Nothing completed yet.</li>';
+}
+
+function fillSelect(id, items, placeholder) {
+  const el = $(id);
+  const prev = el.value;
+  el.innerHTML = `<option value="">${placeholder}</option>` + items.map((o) =>
+    `<option value="${o.value}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}</option>`).join('');
+  if ([...el.options].some((o) => o.value === prev && !o.disabled)) el.value = prev;
+}
+
+function renderSelects() {
+  const act = ranked();
+  const opt = (c, suffix = '') => ({ value: c.id, label: `${c.name} (${c.team}) · ${c.points}${suffix}` });
+  fillSelect('pointTarget', act.map((c) => opt(c)), 'Select contestant…');
+  fillSelect('captainTarget', act.map((c) => ({ ...opt(c, c.captain ? ' 👑 current' : ''), disabled: c.captain })), 'Select new Captain…');
+  fillSelect('nominateTarget', act.map((c) => ({
+    ...opt(c, c.immune ? ' — 🛡 IMMUNE (locked)' : c.nominated ? ' — 🎯 nominated' : ''),
+    disabled: c.immune,
+  })), 'Select contestant…');
+  fillSelect('immunityTarget', act.map((c) => opt(c, c.immune ? ' — 🛡 immune' : '')), 'Select contestant…');
+  fillSelect('evictTarget', act.map((c) => opt(c, c.nominated ? ' — 🎯 nominated' : '')), 'Select contestant to evict…');
+
+  const taskSel = $('taskAssignee');
+  const prev = taskSel.value;
+  const activeTeams = [...new Set(act.map((c) => c.team))];
+  taskSel.innerHTML = '<option value="">Assign to…</option>' +
+    `<optgroup label="Teams">${activeTeams.map((t) => `<option value="t:${esc(t)}">Team ${esc(t)}</option>`).join('')}</optgroup>` +
+    `<optgroup label="Contestants">${act.map((c) => `<option value="c:${c.id}">${esc(c.name)}</option>`).join('')}</optgroup>`;
+  if ([...taskSel.options].some((o) => o.value === prev)) taskSel.value = prev;
+}
+
+function renderDangerZone() {
+  const noms = ranked().filter((c) => c.nominated);
+  $('dzCount').textContent = `${noms.length} nominee${noms.length === 1 ? '' : 's'}`;
+  $('dangerZone').innerHTML = noms.length ? noms.map((c) => `
+    <div class="dz-card">
+      <div class="nm">${c.captain ? '👑 ' : ''}${esc(c.name)}</div>
+      ${teamTag(c.team)}
+      <div class="pts">${c.points} pts</div>
+      <div>${badges(c)}${c.immune ? '' : '<span class="badge b-evicted">No immunity</span>'}</div>
+      <div class="actions">
+        <button class="btn btn-ghost xs" data-act="unnom" data-id="${c.id}">Save</button>
+        <button class="btn btn-green xs" data-act="imm" data-id="${c.id}">🛡 Immunity</button>
+        <button class="btn btn-red xs" data-act="evict" data-id="${c.id}">🚪 Evict</button>
+      </div>
+    </div>`).join('') : '<div class="empty">The Danger Zone is clear. No nominations.</div>';
+}
+
+function renderStats() {
+  const list = ranked();
+  const top = list[0];
+  const tie = top ? list.filter((c) => c.points === top.points) : [];
+  const cap = captain();
+  const s = [
+    ['Active Contestants', active().length, 'blue'],
+    ['Highest Scorer', top ? tie.map((c) => c.name).join(', ') : '—', 'gold'],
+    ['Highest Score', top ? top.points : 0, 'gold'],
+    ['Completed Tasks', state.tasks.filter((t) => t.done).length, 'green'],
+    ['Active Tasks', state.tasks.filter((t) => !t.done).length, 'blue'],
+    ['Nominees', active().filter((c) => c.nominated).length, 'red'],
+    ['Immune', active().filter((c) => c.immune).length, 'green'],
+    ['House Captain', cap ? cap.name : 'None', 'gold'],
+    ['Evicted', state.evictions.length, ''],
+    ['Total House Points', active().reduce((a, c) => a + c.points, 0), ''],
+  ];
+  $('stats').innerHTML = s.map(([k, v, cls]) => `<div class="stat ${cls}"><div class="k">${k}</div><div class="v" title="${esc(v)}">${esc(v)}</div></div>`).join('');
+}
+
+function renderTimer() {
+  const t = state.timer;
+  const card = $('timerCard');
+  card.className = 'card timer-card ' + t.status + (t.status === 'running' && t.remaining <= 10 ? ' warning' : '');
+  $('timerDisplay').textContent = fmtClock(t.remaining);
+  $('timerState').textContent = { ready: 'READY', running: '● RUNNING', paused: '❚❚ PAUSED', finished: '⏰ TIME UP' }[t.status];
+  $('timerBar').style.width = `${(t.remaining / t.duration) * 100}%`;
+  const task = state.tasks.find((x) => x.id === t.taskId && !x.done);
+  $('timerTask').textContent = task ? `Linked: ${task.title} → ${assigneeLabel(task.assignee)}` : 'No task linked (use ⏱ on a task)';
+  $('timerStart').disabled = t.status === 'running';
+  $('timerPause').disabled = t.status !== 'running';
+  $('timerMinutes').disabled = t.status === 'running' || t.status === 'paused';
+}
+
+function renderFeeds() {
+  $('announceFeed').innerHTML = state.announcements.length ? state.announcements.map((a) =>
+    `<li><span class="time">${fmtTime(a.time)}</span>📢 ${esc(a.text)}</li>`).join('') : '<li class="empty">No announcements yet.</li>';
+  $('activityLog').innerHTML = state.activity.map((a) =>
+    `<li><span class="time">${fmtTime(a.time)}</span>${esc(a.text)}</li>`).join('');
+  $('evictionHistory').innerHTML = state.evictions.length ? state.evictions.map((e) =>
+    `<li><div><strong>${esc(e.name)}</strong> ${teamTag(e.team)} ${e.wasCaptain ? '<span class="badge b-captain">ex-captain</span>' : ''}
+     <span class="time">${fmtTime(e.time)} · Final: ${e.points} pts</span></div><span class="badge b-evicted">Evicted</span></li>`).join('')
+    : '<li class="empty">No evictions yet.</li>';
+}
+
+/* ---------------- Event wiring ---------------- */
+function wire() {
+  $('addContestantForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    Actions.addContestant($('newName').value, $('newTeam').value, $('newPoints').value);
+    e.target.reset(); $('newPoints').value = 0;
+  });
+  $('taskForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    Actions.createTask($('taskTitle').value, $('taskAssignee').value, $('taskReward').value);
+    $('taskTitle').value = '';
+  });
+
+  $('addPoints').onclick = () => Actions.changePoints($('pointTarget').value, Math.abs($('pointAmount').value));
+  $('deductPoints').onclick = () => Actions.changePoints($('pointTarget').value, -Math.abs($('pointAmount').value));
+  document.querySelectorAll('[data-quick]').forEach((b) =>
+    (b.onclick = () => Actions.changePoints($('pointTarget').value, b.dataset.quick)));
+
+  $('assignCaptain').onclick = () => Actions.setCaptain($('captainTarget').value);
+  $('removeCaptain').onclick = () => Actions.removeCaptain();
+  $('nominate').onclick = () => Actions.nominate($('nominateTarget').value);
+  $('cancelNomination').onclick = () => Actions.cancelNomination($('nominateTarget').value);
+  $('grantImmunity').onclick = () => Actions.grantImmunity($('immunityTarget').value);
+  $('revokeImmunity').onclick = () => Actions.revokeImmunity($('immunityTarget').value);
+  $('evict').onclick = () => Actions.evict($('evictTarget').value);
+
+  $('broadcastBtn').onclick = () => { Actions.broadcast($('announceText').value); $('announceText').value = ''; };
+  $('announceText').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('broadcastBtn').click(); }
+  });
+  $('broadcastClose').onclick = hideBroadcast;
+  $('broadcastOverlay').onclick = (e) => { if (e.target.id === 'broadcastOverlay') hideBroadcast(); };
+
+  $('timerStart').onclick = () => Timer.start();
+  $('timerPause').onclick = () => Timer.pause();
+  $('timerReset').onclick = () => { Timer.reset(); log('⟲ Task timer reset.'); commit(); };
+  $('timerMinutes').addEventListener('change', () => { if (state.timer.status === 'ready' || state.timer.status === 'finished') Timer.reset(); });
+
+  // Delegated quick actions (table, danger zone)
+  document.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]');
+    if (b) {
+      const id = b.dataset.id;
+      ({
+        pts: () => Actions.changePoints(id, b.dataset.v),
+        cap: () => Actions.setCaptain(id),
+        nom: () => Actions.nominate(id),
+        unnom: () => Actions.cancelNomination(id),
+        imm: () => Actions.grantImmunity(id),
+        unimm: () => Actions.revokeImmunity(id),
+        evict: () => Actions.evict(id),
+      })[b.dataset.act]?.();
+      return;
+    }
+    const tb = e.target.closest('[data-task]');
+    if (tb) {
+      const id = Number(tb.dataset.id);
+      ({ done: () => Actions.completeTask(id), del: () => Actions.deleteTask(id), timer: () => Timer.linkTask(id) })[tb.dataset.task]();
+    }
+  });
+
+  $('resetData').onclick = () => {
+    if (!confirm('Reset the Command Center to demo data?')) return;
+    clearInterval(timerInterval);
+    state = seedState(); prevPoints = {};
+    commit(); toast('Demo data restored', 'success');
+  };
+
+  setInterval(() => { $('hClock').textContent = new Date().toLocaleTimeString(); renderHeader(); }, 1000);
+}
+
+/* ---------------- Boot ---------------- */
+wire();
+$('timerMinutes').value = Math.round(state.timer.duration / 60);
+render();
+prevPoints = Object.fromEntries(state.contestants.map((c) => [c.id, c.points]));

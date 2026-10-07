@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Big Boss Command Center — Tech House Live Control</title>
+  <meta name="description" content="Real-time Big Boss Tech House Command Center: manage contestants, tasks, points, captaincy, nominations, immunity, announcements, timers and evictions." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Broadcast overlay -->
+  <div id="broadcastOverlay" class="broadcast-overlay" aria-live="assertive">
+    <div class="broadcast-box">
+      <div class="broadcast-eye">👁</div>
+      <div class="broadcast-label">BIG BOSS ANNOUNCEMENT</div>
+      <p id="broadcastText"></p>
+      <button id="broadcastClose" class="btn btn-ghost">Dismiss</button>
+    </div>
+  </div>
+
+  <header class="header">
+    <div class="brand">
+      <span class="eye">👁</span>
+      <div>
+        <h1>BIG BOSS <span>COMMAND CENTER</span></h1>
+        <div class="sub">Tech House · Control Room</div>
+      </div>
+    </div>
+    <div class="header-stats">
+      <div class="hpill live"><span class="dot"></span> LIVE · <span id="hActive">0</span> in house</div>
+      <div class="hpill gold">👑 Captain: <strong id="hCaptain">None</strong></div>
+      <div class="hpill" id="hBroadcast">📡 No broadcast</div>
+      <div class="hpill" id="hClock">--:--:--</div>
+      <button id="resetData" class="btn btn-ghost sm" title="Reset demo data">⟲ Reset</button>
+    </div>
+  </header>
+
+  <div id="ticker" class="ticker"><div class="ticker-inner" id="tickerInner">Welcome to the Tech House. Big Boss is watching.</div></div>
+
+  <main class="grid">
+    <!-- LEFT / MAIN -->
+    <section class="col-main">
+      <article class="card" id="leaderboardCard">
+        <div class="card-head"><h2>🏆 Live Leaderboard</h2><span class="tag">Active only</span></div>
+        <ol id="leaderboard" class="leaderboard"></ol>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>👥 Contestant Management</h2><span class="tag" id="contestantCount"></span></div>
+        <form id="addContestantForm" class="row-form">
+          <input id="newName" placeholder="Name" required maxlength="20" />
+          <input id="newTeam" placeholder="Team" required maxlength="12" list="teamList" />
+          <datalist id="teamList"></datalist>
+          <input id="newPoints" type="number" placeholder="Points" value="0" />
+          <button class="btn btn-primary" type="submit">+ Add</button>
+        </form>
+        <div class="table-wrap">
+          <table class="ctable">
+            <thead><tr><th>Name</th><th>Team</th><th>Points</th><th>Status</th><th>Quick Actions</th></tr></thead>
+            <tbody id="contestantTable"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>📋 Task Management</h2><span class="tag" id="taskCount"></span></div>
+        <form id="taskForm" class="row-form">
+          <input id="taskTitle" placeholder="Task name (e.g. Code Relay)" required maxlength="40" />
+          <select id="taskAssignee" required></select>
+          <input id="taskReward" type="number" placeholder="Reward" value="100" min="0" />
+          <button class="btn btn-primary" type="submit">Assign Task</button>
+        </form>
+        <div class="tasks-split">
+          <div>
+            <h3>Active</h3>
+            <ul id="activeTasks" class="task-list"></ul>
+          </div>
+          <div>
+            <h3>Completed</h3>
+            <ul id="completedTasks" class="task-list done"></ul>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- RIGHT / CONTROLS -->
+    <aside class="col-side">
+      <article class="card control">
+        <div class="card-head"><h2>💎 Point Controls</h2></div>
+        <select id="pointTarget"></select>
+        <div class="row">
+          <input id="pointAmount" type="number" value="50" min="1" />
+          <button id="addPoints" class="btn btn-green">+ Add</button>
+          <button id="deductPoints" class="btn btn-red">− Deduct</button>
+        </div>
+        <div class="quick">
+          <button class="btn btn-ghost sm" data-quick="10">+10</button>
+          <button class="btn btn-ghost sm" data-quick="50">+50</button>
+          <button class="btn btn-ghost sm" data-quick="100">+100</button>
+          <button class="btn btn-ghost sm" data-quick="-50">−50</button>
+        </div>
+      </article>
+
+      <article class="card control gold-border">
+        <div class="card-head"><h2>👑 Captaincy</h2></div>
+        <div class="current">Current: <strong id="captainCurrent">None</strong></div>
+        <select id="captainTarget"></select>
+        <div class="row">
+          <button id="assignCaptain" class="btn btn-gold">Assign / Change Captain</button>
+          <button id="removeCaptain" class="btn btn-ghost">Remove</button>
+        </div>
+      </article>
+
+      <article class="card control red-border">
+        <div class="card-head"><h2>🎯 Nominations</h2></div>
+        <select id="nominateTarget"></select>
+        <div class="row">
+          <button id="nominate" class="btn btn-red">Nominate</button>
+          <button id="cancelNomination" class="btn btn-ghost">Cancel Nomination</button>
+        </div>
+        <small class="hint">🛡 Immune contestants are locked from nomination.</small>
+      </article>
+
+      <article class="card control green-border">
+        <div class="card-head"><h2>🛡 Immunity</h2></div>
+        <select id="immunityTarget"></select>
+        <div class="row">
+          <button id="grantImmunity" class="btn btn-green">Grant Immunity</button>
+          <button id="revokeImmunity" class="btn btn-ghost">Revoke</button>
+        </div>
+        <small class="hint">Granting immunity to a nominee saves them from the Danger Zone.</small>
+      </article>
+
+      <article class="card control danger">
+        <div class="card-head"><h2>🚪 Eviction</h2></div>
+        <select id="evictTarget"></select>
+        <button id="evict" class="btn btn-red full">EVICT CONTESTANT</button>
+      </article>
+
+      <article class="card control">
+        <div class="card-head"><h2>📢 Announcement</h2></div>
+        <textarea id="announceText" rows="2" maxlength="160" placeholder="Big Boss chahte hain..."></textarea>
+        <button id="broadcastBtn" class="btn btn-primary full">📡 BROADCAST</button>
+      </article>
+    </aside>
+
+    <!-- BOTTOM / MONITORING -->
+    <section class="col-bottom">
+      <article class="card danger-zone">
+        <div class="card-head"><h2>⚠️ Danger Zone</h2><span class="tag red" id="dzCount">0 nominees</span></div>
+        <div id="dangerZone" class="dz-grid"></div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>📊 House Statistics</h2></div>
+        <div id="stats" class="stats-grid"></div>
+      </article>
+
+      <article class="card timer-card" id="timerCard">
+        <div class="card-head"><h2>⏱ Task Timer</h2><span class="tag" id="timerState">READY</span></div>
+        <div class="timer-task" id="timerTask">No task linked</div>
+        <div class="timer-display" id="timerDisplay">05:00</div>
+        <div class="timer-bar"><div id="timerBar"></div></div>
+        <div class="row">
+          <input id="timerMinutes" type="number" min="1" max="99" value="5" title="Minutes" />
+          <button id="timerStart" class="btn btn-green">▶ Start</button>
+          <button id="timerPause" class="btn btn-gold">⏸ Pause</button>
+          <button id="timerReset" class="btn btn-ghost">⟲ Reset</button>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>📡 Announcement Feed</h2></div>
+        <ul id="announceFeed" class="feed"></ul>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>🕘 Activity Log</h2></div>
+        <ul id="activityLog" class="feed log"></ul>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>🪦 Eviction History</h2></div>
+        <ul id="evictionHistory" class="feed evicted"></ul>
+      </article>
+    </section>
+  </main>
+
+  <div id="toasts" class="toasts"></div>
+  <script src="app.js"></script>
+</body>
+</html>
