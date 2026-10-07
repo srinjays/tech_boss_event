@@ -250,6 +250,56 @@
         <button id="logNew" class="log-new" hidden>⬆ 0 new events — resume live</button>
         <ul id="activityLog" class="feed log live-log"></ul>
       </article>
+
+      <!-- Performance Analytics -->
+      <article class="card analytics-card" id="analyticsCard">
+        <div class="card-head">
+          <h2>📈 Performance Analytics</h2>
+          <div class="analytics-tabs">
+            <button class="chip active" data-atab="overview">Overview</button>
+            <button class="chip" data-atab="teams">Teams</button>
+            <button class="chip" data-atab="contestants">Contestants</button>
+            <button class="chip" data-atab="insights">Insights</button>
+          </div>
+        </div>
+
+        <!-- Overview tab -->
+        <div id="aTab-overview" class="atab">
+          <div class="analytics-overview">
+            <div class="ao-chart-wrap">
+              <h3>Contestant Points Comparison</h3>
+              <canvas id="chartPoints" height="220"></canvas>
+            </div>
+            <div class="ao-chart-wrap">
+              <h3>Point History Timeline</h3>
+              <canvas id="chartHistory" height="220"></canvas>
+              <small class="hint">Tracks every point change in real time</small>
+            </div>
+          </div>
+          <div class="ao-kpis" id="analyticsKPIs"></div>
+        </div>
+
+        <!-- Teams tab -->
+        <div id="aTab-teams" class="atab" hidden>
+          <div class="analytics-overview">
+            <div class="ao-chart-wrap">
+              <h3>Team Points Comparison</h3>
+              <canvas id="chartTeams" height="200"></canvas>
+            </div>
+            <div id="teamCards" class="team-cards"></div>
+          </div>
+        </div>
+
+        <!-- Contestants tab -->
+        <div id="aTab-contestants" class="atab" hidden>
+          <div id="contestantAnalytics" class="contestant-analytics"></div>
+        </div>
+
+        <!-- Insights tab -->
+        <div id="aTab-insights" class="atab" hidden>
+          <div id="insightsList" class="insights-list"></div>
+        </div>
+      </article>
     </section>
   </main>
 

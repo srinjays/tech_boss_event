@@ -196,6 +196,7 @@ function seedState() {
     nextLogId: 2,
     evictions: [],
     timer: { duration: 300, remaining: 300, status: 'ready', taskId: null },
+    pointHistory: seed.map(([name, , pts], i) => [{ cid: i + 1, pts, delta: pts, time: Date.now(), reason: 'Initial' }]).flat(),
   };
 }
 
@@ -307,6 +308,8 @@ const Actions = {
     delta = Number(delta);
     if (!delta) return toast('Enter a valid amount.', 'error');
     c.points = Math.max(0, c.points + delta);
+    if (!state.pointHistory) state.pointHistory = [];
+    state.pointHistory.push({ cid: c.id, pts: c.points, delta, time: Date.now(), reason: 'Manual' });
     log(`${delta > 0 ? '+' : ''}${delta} points ${delta > 0 ? 'to' : 'from'} ${c.name} (now ${c.points}).`, 'points');
     toast(`${c.name}: ${delta > 0 ? '+' : ''}${delta} pts`, delta > 0 ? 'success' : 'error');
     commit();
@@ -411,7 +414,11 @@ const Actions = {
     const winners = t.assignee.startsWith('t:')
       ? active().filter((c) => c.team === t.assignee.slice(2))
       : [byId(t.assignee.slice(2))].filter((c) => c && !c.evicted);
-    winners.forEach((c) => (c.points += t.reward));
+    winners.forEach((c) => {
+      c.points += t.reward;
+      if (!state.pointHistory) state.pointHistory = [];
+      state.pointHistory.push({ cid: c.id, pts: c.points, delta: t.reward, time: Date.now(), reason: `Task: ${t.title}` });
+    });
     if (state.timer.taskId === id) Timer.reset(true);
     log(`Task "${t.title}" completed by ${assigneeLabel(t.assignee)}${t.reward ? ` (+${t.reward} pts each)` : ''}.`, 'task');
     toast(`✅ "${t.title}" completed`, 'success');
@@ -626,6 +633,7 @@ function render() {
   renderLog();
   renderNotifBadge();
   if (notifPanelOpen) renderNotifPanel();
+  renderAnalytics();
   prevPoints = Object.fromEntries(state.contestants.map((c) => [c.id, c.points]));
 }
 
@@ -1152,9 +1160,410 @@ function wireNotifications() {
   };
 }
 
+/* ---------------- Performance Analytics ---------------- */
+let activeATab = 'overview';
+
+function renderAnalytics() {
+  const tab = activeATab;
+  if (tab === 'overview') renderAOverview();
+  else if (tab === 'teams') renderATeams();
+  else if (tab === 'contestants') renderAContestants();
+  else if (tab === 'insights') renderAInsights();
+}
+
+function renderAOverview() {
+  drawPointsBar();
+  drawHistoryChart();
+  renderKPIs();
+}
+
+function drawPointsBar() {
+  const canvas = $('chartPoints');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement;
+  canvas.width = rect.clientWidth * dpr;
+  canvas.height = 220 * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.clientWidth, H = 220;
+  ctx.clearRect(0, 0, W, H);
+
+  const list = ranked();
+  if (!list.length) return;
+  const max = Math.max(1, ...list.map(c => c.points));
+  const barW = Math.min(40, (W - 40) / list.length - 6);
+  const gap = (W - 40) / list.length;
+
+  list.forEach((c, i) => {
+    const x = 30 + i * gap + (gap - barW) / 2;
+    const h = (c.points / max) * (H - 50);
+    const y = H - 24 - h;
+    const col = c.captain ? '#ffc940' : teamColor(c.team);
+
+    // Bar
+    const grad = ctx.createLinearGradient(x, y, x, H - 24);
+    grad.addColorStop(0, col);
+    grad.addColorStop(1, col + '44');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.roundRect(x, y, barW, h, [4, 4, 0, 0]);
+    ctx.fill();
+
+    // Value
+    ctx.fillStyle = '#e8e9f5';
+    ctx.font = '600 10px Orbitron';
+    ctx.textAlign = 'center';
+    ctx.fillText(c.points, x + barW / 2, y - 6);
+
+    // Name
+    ctx.fillStyle = '#8a8fb3';
+    ctx.font = '500 9px Inter';
+    ctx.fillText(c.name.slice(0, 6), x + barW / 2, H - 10);
+  });
+}
+
+function drawHistoryChart() {
+  const canvas = $('chartHistory');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvas.parentElement.clientWidth * dpr;
+  canvas.height = 220 * dpr;
+  ctx.scale(dpr, dpr);
+  const W = canvas.parentElement.clientWidth, H = 220;
+  ctx.clearRect(0, 0, W, H);
+
+  const history = state.pointHistory || [];
+  if (history.length < 2) {
+    ctx.fillStyle = '#8a8fb3';
+    ctx.font = '12px Inter';
+    ctx.textAlign = 'center';
+    ctx.fillText('Point changes will appear here as a timeline', W / 2, H / 2);
+    return;
+  }
+
+  // Group by contestant, plot lines
+  const cids = [...new Set(history.map(h => h.cid))];
+  const tMin = Math.min(...history.map(h => h.time));
+  const tMax = Math.max(...history.map(h => h.time));
+  const tRange = Math.max(1, tMax - tMin);
+  const pMax = Math.max(1, ...history.map(h => h.pts));
+  const pad = { l: 35, r: 10, t: 10, b: 20 };
+  const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+
+  // Grid lines
+  ctx.strokeStyle = '#1d1f33';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (cH / 4) * i;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.fillStyle = '#555';
+    ctx.font = '9px Inter';
+    ctx.textAlign = 'right';
+    ctx.fillText(Math.round(pMax * (1 - i / 4)), pad.l - 4, y + 3);
+  }
+
+  cids.forEach(cid => {
+    const c = byId(cid);
+    if (!c) return;
+    const points = history.filter(h => h.cid === cid).sort((a, b) => a.time - b.time);
+    if (points.length < 1) return;
+    const col = c.captain ? '#ffc940' : teamColor(c.team);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = c.evicted ? 0.3 : 0.85;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const x = pad.l + ((p.time - tMin) / tRange) * cW;
+      const y = pad.t + cH - (p.pts / pMax) * cH;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // End dot + label
+    const last = points[points.length - 1];
+    const lx = pad.l + ((last.time - tMin) / tRange) * cW;
+    const ly = pad.t + cH - (last.pts / pMax) * cH;
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.font = '600 8px Inter';
+    ctx.textAlign = 'left';
+    ctx.fillText(c.name.slice(0, 5), lx + 5, ly + 3);
+    ctx.globalAlpha = 1;
+  });
+}
+
+function renderKPIs() {
+  const list = ranked();
+  const hist = state.pointHistory || [];
+  const totalPts = list.reduce((a, c) => a + c.points, 0);
+  const avgPts = list.length ? Math.round(totalPts / list.length) : 0;
+  const topGainer = findTopGainer(hist);
+  const totalChanges = hist.length;
+  const doneTasks = state.tasks.filter(t => t.done).length;
+  const taskPts = state.tasks.filter(t => t.done).reduce((a, t) => a + t.reward, 0);
+  const spread = list.length >= 2 ? list[0].points - list[list.length - 1].points : 0;
+
+  const kpis = [
+    ['Total Points', totalPts, '', 'blue'],
+    ['Average Score', avgPts, `across ${list.length} contestants`, ''],
+    ['Top Gainer', topGainer.name || '—', topGainer.delta ? `+${topGainer.delta} pts gained` : '', 'up'],
+    ['Point Spread', spread, 'gap between #1 and last', spread > 300 ? 'down' : ''],
+    ['Task Rewards', taskPts, `from ${doneTasks} completed tasks`, 'gold'],
+    ['Point Events', totalChanges, 'total point changes recorded', ''],
+  ];
+  $('analyticsKPIs').innerHTML = kpis.map(([l, v, d, cls]) =>
+    `<div class="kpi ${cls}"><div class="kpi-label">${l}</div><div class="kpi-value">${esc(String(v))}</div><div class="kpi-detail">${d}</div></div>`).join('');
+}
+
+function findTopGainer(hist) {
+  const gains = {};
+  hist.filter(h => h.delta > 0).forEach(h => { gains[h.cid] = (gains[h.cid] || 0) + h.delta; });
+  let best = { cid: null, delta: 0 };
+  for (const [cid, d] of Object.entries(gains)) if (d > best.delta) best = { cid: Number(cid), delta: d };
+  const c = byId(best.cid);
+  return { name: c ? c.name : '', delta: best.delta };
+}
+
+function renderATeams() {
+  drawTeamChart();
+  const activeTeams = [...new Set(active().map(c => c.team))];
+  const teamData = activeTeams.map(t => {
+    const members = active().filter(c => c.team === t);
+    const total = members.reduce((a, c) => a + c.points, 0);
+    const avg = Math.round(total / members.length);
+    const top = members.sort((a, b) => b.points - a.points)[0];
+    const tasks = state.tasks.filter(tk => tk.done && tk.assignee === 't:' + t).length;
+    return { team: t, members: members.length, total, avg, top, tasks };
+  }).sort((a, b) => b.total - a.total);
+
+  const maxTotal = Math.max(1, ...teamData.map(t => t.total));
+  $('teamCards').innerHTML = teamData.map((t, i) => `
+    <div class="t-card">
+      <div class="tc-rank" style="color:${teamColor(t.team)}">${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i + 1)}</div>
+      <div class="tc-info">
+        <div class="tc-name">${teamTag(t.team)} <span>${t.members} members</span></div>
+        <div class="tc-meta">MVP: <strong>${esc(t.top.name)}</strong> (${t.top.points} pts) · ${t.tasks} tasks done</div>
+        <div class="tc-bar"><div style="width:${(t.total / maxTotal) * 100}%;background:${teamColor(t.team)}"></div></div>
+      </div>
+      <div class="tc-stats">
+        <div class="tc-stat">Total<b style="color:${teamColor(t.team)}">${t.total}</b></div>
+        <div class="tc-stat">Avg<b>${t.avg}</b></div>
+      </div>
+    </div>`).join('');
+}
+
+function drawTeamChart() {
+  const canvas = $('chartTeams');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvas.parentElement.clientWidth * dpr;
+  canvas.height = 200 * dpr;
+  ctx.scale(dpr, dpr);
+  const W = canvas.parentElement.clientWidth, H = 200;
+  ctx.clearRect(0, 0, W, H);
+
+  const activeTeams = [...new Set(active().map(c => c.team))];
+  const data = activeTeams.map(t => ({
+    team: t,
+    total: active().filter(c => c.team === t).reduce((a, c) => a + c.points, 0),
+    avg: Math.round(active().filter(c => c.team === t).reduce((a, c) => a + c.points, 0) / active().filter(c => c.team === t).length),
+  })).sort((a, b) => b.total - a.total);
+  if (!data.length) return;
+
+  const max = Math.max(1, ...data.map(d => d.total));
+  const barW = Math.min(60, (W - 40) / data.length - 12);
+  const gap = (W - 40) / data.length;
+
+  data.forEach((d, i) => {
+    const x = 30 + i * gap + (gap - barW) / 2;
+    const h = (d.total / max) * (H - 50);
+    const y = H - 24 - h;
+    const col = teamColor(d.team);
+    const grad = ctx.createLinearGradient(x, y, x, H - 24);
+    grad.addColorStop(0, col);
+    grad.addColorStop(1, col + '33');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.roundRect(x, y, barW, h, [6, 6, 0, 0]); ctx.fill();
+
+    ctx.fillStyle = '#e8e9f5';
+    ctx.font = '600 12px Orbitron';
+    ctx.textAlign = 'center';
+    ctx.fillText(d.total, x + barW / 2, y - 8);
+    ctx.fillStyle = col;
+    ctx.font = '600 11px Inter';
+    ctx.fillText(d.team, x + barW / 2, H - 8);
+  });
+}
+
+function renderAContestants() {
+  const list = [...state.contestants].sort((a, b) => a.evicted - b.evicted || b.points - a.points);
+  const hist = state.pointHistory || [];
+
+  $('contestantAnalytics').innerHTML = list.map(c => {
+    const cHist = hist.filter(h => h.cid === c.id).sort((a, b) => a.time - b.time);
+    const gained = cHist.filter(h => h.delta > 0).reduce((a, h) => a + h.delta, 0);
+    const lost = cHist.filter(h => h.delta < 0).reduce((a, h) => a + Math.abs(h.delta), 0);
+    const tasksDone = state.tasks.filter(t => t.done && (t.assignee === 'c:' + c.id || (t.assignee.startsWith('t:') && t.assignee.slice(2) === c.team))).length;
+    const rank = ranked().findIndex(r => r.id === c.id) + 1;
+    const sparkId = 'spark-' + c.id;
+
+    return `<div class="ca-card ${c.captain ? 'captain' : ''} ${c.evicted ? 'evicted' : ''}">
+      <div class="ca-head">
+        <div class="ca-name">${c.captain ? '👑 ' : ''}${esc(c.name)} ${teamTag(c.team)}</div>
+        <div class="ca-pts">${c.points}</div>
+      </div>
+      <div>${badges(c)}</div>
+      <div class="ca-stats">
+        <div class="ca-stat"><div class="cs-val" style="color:var(--green)">+${gained}</div><div class="cs-lab">Gained</div></div>
+        <div class="ca-stat"><div class="cs-val" style="color:var(--red)">-${lost}</div><div class="cs-lab">Lost</div></div>
+        <div class="ca-stat"><div class="cs-val">${tasksDone}</div><div class="cs-lab">Tasks</div></div>
+      </div>
+      <div class="ca-stats">
+        <div class="ca-stat"><div class="cs-val">${cHist.length}</div><div class="cs-lab">Events</div></div>
+        <div class="ca-stat"><div class="cs-val">${c.evicted ? '—' : '#' + (rank || '—')}</div><div class="cs-lab">Rank</div></div>
+        <div class="ca-stat"><div class="cs-val">${c.immune ? '🛡' : c.nominated ? '🎯' : '—'}</div><div class="cs-lab">Status</div></div>
+      </div>
+      <canvas class="ca-sparkline" id="${sparkId}" height="36"></canvas>
+    </div>`;
+  }).join('');
+
+  // Draw sparklines
+  list.forEach(c => {
+    const canvas = document.getElementById('spark-' + c.id);
+    if (!canvas) return;
+    drawSparkline(canvas, hist.filter(h => h.cid === c.id).sort((a, b) => a.time - b.time), c);
+  });
+}
+
+function drawSparkline(canvas, points, c) {
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * dpr;
+  canvas.height = 36 * dpr;
+  ctx.scale(dpr, dpr);
+  const W = canvas.clientWidth, H = 36;
+  ctx.clearRect(0, 0, W, H);
+
+  if (points.length < 2) {
+    ctx.fillStyle = '#555'; ctx.font = '9px Inter'; ctx.textAlign = 'center';
+    ctx.fillText('Not enough data', W / 2, H / 2 + 3);
+    return;
+  }
+
+  const vals = points.map(p => p.pts);
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  const range = Math.max(1, mx - mn);
+  const col = c.captain ? '#ffc940' : teamColor(c.team);
+
+  ctx.strokeStyle = col;
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = (i / (points.length - 1)) * W;
+    const y = H - 4 - ((p.pts - mn) / range) * (H - 8);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Fill under
+  const lastX = W, lastY = H - 4 - ((vals[vals.length - 1] - mn) / range) * (H - 8);
+  ctx.lineTo(lastX, H); ctx.lineTo(0, H); ctx.closePath();
+  ctx.fillStyle = col + '18';
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function renderAInsights() {
+  const list = ranked();
+  const hist = state.pointHistory || [];
+  const insights = [];
+
+  // Leader analysis
+  if (list.length >= 2) {
+    const gap = list[0].points - list[1].points;
+    if (gap > 200) insights.push({ icon: '🏆', text: `<strong>${esc(list[0].name)}</strong> leads by a massive <strong>${gap}</strong> points — dominating the house.`, cls: 'positive' });
+    else if (gap > 0) insights.push({ icon: '🏆', text: `<strong>${esc(list[0].name)}</strong> leads <strong>${esc(list[1].name)}</strong> by just <strong>${gap}</strong> points — a close race.`, cls: 'warning' });
+    else insights.push({ icon: '🤝', text: `<strong>${esc(list[0].name)}</strong> and <strong>${esc(list[1].name)}</strong> are tied at <strong>${list[0].points}</strong> points!`, cls: 'info' });
+  }
+
+  // Underdog
+  if (list.length >= 3) {
+    const last = list[list.length - 1];
+    insights.push({ icon: '🐢', text: `<strong>${esc(last.name)}</strong> is in last place with <strong>${last.points}</strong> points — needs a big task win to climb.`, cls: 'warning' });
+  }
+
+  // Captain insight
+  const cap = captain();
+  if (cap) {
+    const capRank = list.findIndex(c => c.id === cap.id) + 1;
+    if (capRank === 1) insights.push({ icon: '👑', text: `Captain <strong>${esc(cap.name)}</strong> leads both in rank and authority — a dominant run.`, cls: 'positive' });
+    else insights.push({ icon: '👑', text: `Captain <strong>${esc(cap.name)}</strong> is ranked #${capRank} — not the top scorer despite holding the crown.`, cls: 'info' });
+  }
+
+  // Team balance
+  const activeTeams = [...new Set(active().map(c => c.team))];
+  if (activeTeams.length >= 2) {
+    const teamTotals = activeTeams.map(t => ({ team: t, total: active().filter(c => c.team === t).reduce((a, c) => a + c.points, 0) })).sort((a, b) => b.total - a.total);
+    const diff = teamTotals[0].total - teamTotals[teamTotals.length - 1].total;
+    if (diff > 400) insights.push({ icon: '⚖️', text: `Team <strong>${esc(teamTotals[0].team)}</strong> has <strong>${diff}</strong> more total points than Team <strong>${esc(teamTotals[teamTotals.length - 1].team)}</strong> — imbalanced house.`, cls: 'critical' });
+    else insights.push({ icon: '⚖️', text: `Team scores are within <strong>${diff}</strong> points of each other — well balanced.`, cls: 'positive' });
+  }
+
+  // Nomination pressure
+  const noms = active().filter(c => c.nominated);
+  if (noms.length >= 3) insights.push({ icon: '🎯', text: `<strong>${noms.length}</strong> contestants are nominated — the Danger Zone is crowded. Expect a dramatic eviction.`, cls: 'critical' });
+  else if (noms.length === 0) insights.push({ icon: '✅', text: 'No active nominations. The house is at peace... for now.', cls: 'positive' });
+
+  // Immunity insight
+  const immunes = active().filter(c => c.immune);
+  if (immunes.length > 0) insights.push({ icon: '🛡', text: `<strong>${immunes.map(c => esc(c.name)).join(', ')}</strong> ${immunes.length === 1 ? 'is' : 'are'} immune — safe from nomination this round.`, cls: 'info' });
+
+  // Top gainer
+  const gainer = findTopGainer(hist);
+  if (gainer.delta > 0) insights.push({ icon: '📈', text: `<strong>${esc(gainer.name)}</strong> has gained the most points overall: <strong>+${gainer.delta}</strong> total.`, cls: 'positive' });
+
+  // Task efficiency
+  const doneTasks = state.tasks.filter(t => t.done).length;
+  const allTasks = state.tasks.length;
+  if (allTasks > 0) {
+    const rate = Math.round((doneTasks / allTasks) * 100);
+    insights.push({ icon: '📋', text: `Task completion rate: <strong>${rate}%</strong> (${doneTasks}/${allTasks}). ${rate >= 75 ? 'Excellent productivity.' : rate >= 50 ? 'Room for improvement.' : 'Many tasks still pending.'}`, cls: rate >= 75 ? 'positive' : rate >= 50 ? 'info' : 'warning' });
+  }
+
+  // Eviction toll
+  if (state.evictions.length > 0) {
+    const totalLost = state.evictions.reduce((a, e) => a + e.points, 0);
+    insights.push({ icon: '🚪', text: `<strong>${state.evictions.length}</strong> contestant${state.evictions.length > 1 ? 's' : ''} evicted so far, taking <strong>${totalLost}</strong> points out of the house.`, cls: 'critical' });
+  }
+
+  // Point volatility
+  if (hist.length >= 5) {
+    const recent = hist.slice(-10);
+    const avgDelta = Math.round(recent.reduce((a, h) => a + Math.abs(h.delta), 0) / recent.length);
+    insights.push({ icon: '🌊', text: `Average point swing in recent events: <strong>±${avgDelta}</strong> per change. ${avgDelta > 100 ? 'High volatility!' : 'Relatively stable.'}`, cls: avgDelta > 100 ? 'warning' : 'info' });
+  }
+
+  $('insightsList').innerHTML = insights.length ? insights.map(i =>
+    `<div class="insight ${i.cls}"><div class="in-icon">${i.icon}</div><div class="in-text">${i.text}</div></div>`).join('') :
+    '<div class="notif-empty">No insights available yet. Start playing the game!</div>';
+}
+
+function wireAnalyticsTabs() {
+  document.querySelector('.analytics-tabs').addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-atab]');
+    if (!tab) return;
+    activeATab = tab.dataset.atab;
+    document.querySelectorAll('.analytics-tabs .chip').forEach(c => c.classList.toggle('active', c.dataset.atab === activeATab));
+    document.querySelectorAll('.atab').forEach(t => t.hidden = t.id !== 'aTab-' + activeATab);
+    renderAnalytics();
+  });
+}
+
 /* ---------------- Boot ---------------- */
 wire();
 wireNotifications();
+wireAnalyticsTabs();
 announcePresence('hello');
 $('timerMinutes').value = Math.round(state.timer.duration / 60);
 render();
