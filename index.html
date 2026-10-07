@@ -20,6 +20,20 @@
     </div>
   </div>
 
+  <!-- Role / access control modal -->
+  <div id="roleOverlay" class="broadcast-overlay" role="dialog" aria-modal="true" aria-labelledby="roleTitle">
+    <div class="role-box">
+      <div class="card-head"><h2 id="roleTitle">🔐 Console Access Control</h2><button id="roleClose" class="btn btn-ghost sm">✕</button></div>
+      <p class="t-meta">Choose who is operating this console. Higher-privilege roles require a PIN. Each browser tab keeps its own role.</p>
+      <div id="roleGrid" class="role-grid"></div>
+      <form id="pinForm" class="pin-form">
+        <input id="pinInput" type="password" inputmode="numeric" maxlength="6" placeholder="Enter PIN" autocomplete="off" />
+        <button class="btn btn-primary" type="submit" id="pinSubmit">Unlock</button>
+      </form>
+      <small class="hint">Demo PINs — Big Boss: <b>9999</b> · Producer: <b>2025</b> · Moderator: <b>1234</b> · Viewer: none</small>
+    </div>
+  </div>
+
   <header class="header">
     <div class="brand">
       <span class="eye">👁</span>
@@ -33,7 +47,9 @@
       <div class="hpill gold">👑 Captain: <strong id="hCaptain">None</strong></div>
       <div class="hpill" id="hBroadcast">📡 No broadcast</div>
       <div class="hpill" id="hClock">--:--:--</div>
-      <button id="resetData" class="btn btn-ghost sm" title="Reset demo data">⟲ Reset</button>
+      <div class="hpill" id="hConsoles" title="Consoles open in other tabs sync live">🖥 1 console</div>
+      <button id="roleBtn" class="role-pill" title="Switch role">👁 Big Boss ▾</button>
+      <span data-perm="reset"><button id="resetData" class="btn btn-ghost sm" title="Reset demo data">⟲ Reset</button></span>
     </div>
   </header>
 
@@ -49,7 +65,7 @@
 
       <article class="card">
         <div class="card-head"><h2>👥 Contestant Management</h2><span class="tag" id="contestantCount"></span></div>
-        <form id="addContestantForm" class="row-form">
+        <form id="addContestantForm" class="row-form" data-perm="contestants">
           <input id="newName" placeholder="Name" required maxlength="20" />
           <input id="newTeam" placeholder="Team" required maxlength="12" list="teamList" />
           <datalist id="teamList"></datalist>
@@ -66,7 +82,7 @@
 
       <article class="card">
         <div class="card-head"><h2>📋 Task Management</h2><span class="tag" id="taskCount"></span></div>
-        <form id="taskForm" class="row-form">
+        <form id="taskForm" class="row-form" data-perm="tasks">
           <input id="taskTitle" placeholder="Task name (e.g. Code Relay)" required maxlength="40" />
           <select id="taskAssignee" required></select>
           <input id="taskReward" type="number" placeholder="Reward" value="100" min="0" />
@@ -87,7 +103,7 @@
 
     <!-- RIGHT / CONTROLS -->
     <aside class="col-side">
-      <article class="card control">
+      <article class="card control" data-perm="points">
         <div class="card-head"><h2>💎 Point Controls</h2></div>
         <select id="pointTarget"></select>
         <div class="row">
@@ -103,7 +119,7 @@
         </div>
       </article>
 
-      <article class="card control gold-border">
+      <article class="card control gold-border" data-perm="captain">
         <div class="card-head"><h2>👑 Captaincy</h2></div>
         <div class="current">Current: <strong id="captainCurrent">None</strong></div>
         <select id="captainTarget"></select>
@@ -113,7 +129,7 @@
         </div>
       </article>
 
-      <article class="card control red-border">
+      <article class="card control red-border" data-perm="nominate">
         <div class="card-head"><h2>🎯 Nominations</h2></div>
         <select id="nominateTarget"></select>
         <div class="row">
@@ -123,7 +139,7 @@
         <small class="hint">🛡 Immune contestants are locked from nomination.</small>
       </article>
 
-      <article class="card control green-border">
+      <article class="card control green-border" data-perm="immunity">
         <div class="card-head"><h2>🛡 Immunity</h2></div>
         <select id="immunityTarget"></select>
         <div class="row">
@@ -133,13 +149,13 @@
         <small class="hint">Granting immunity to a nominee saves them from the Danger Zone.</small>
       </article>
 
-      <article class="card control danger">
+      <article class="card control danger" data-perm="evict">
         <div class="card-head"><h2>🚪 Eviction</h2></div>
         <select id="evictTarget"></select>
         <button id="evict" class="btn btn-red full">EVICT CONTESTANT</button>
       </article>
 
-      <article class="card control">
+      <article class="card control" data-perm="announce">
         <div class="card-head"><h2>📢 Announcement</h2></div>
         <textarea id="announceText" rows="2" maxlength="160" placeholder="Big Boss chahte hain..."></textarea>
         <button id="broadcastBtn" class="btn btn-primary full">📡 BROADCAST</button>
@@ -163,7 +179,7 @@
         <div class="timer-task" id="timerTask">No task linked</div>
         <div class="timer-display" id="timerDisplay">05:00</div>
         <div class="timer-bar"><div id="timerBar"></div></div>
-        <div class="row">
+        <div class="row" data-perm="timer">
           <input id="timerMinutes" type="number" min="1" max="99" value="5" title="Minutes" />
           <button id="timerStart" class="btn btn-green">▶ Start</button>
           <button id="timerPause" class="btn btn-gold">⏸ Pause</button>
@@ -177,13 +193,26 @@
       </article>
 
       <article class="card">
-        <div class="card-head"><h2>🕘 Activity Log</h2></div>
-        <ul id="activityLog" class="feed log"></ul>
-      </article>
-
-      <article class="card">
         <div class="card-head"><h2>🪦 Eviction History</h2></div>
         <ul id="evictionHistory" class="feed evicted"></ul>
+      </article>
+
+      <article class="card activity-card" id="activityCard">
+        <div class="card-head">
+          <h2><span class="dot"></span> Real-Time Activity Log</h2>
+          <div class="log-tools">
+            <span class="tag" id="logCount">0 events</span>
+            <button id="logFreeze" class="btn btn-ghost sm" title="Freeze the feed to read it">⏸ Freeze</button>
+            <button id="logExport" class="btn btn-ghost sm">⬇ Export CSV</button>
+            <span data-perm="log_clear"><button id="logClear" class="btn btn-ghost sm">🗑 Clear</button></span>
+          </div>
+        </div>
+        <div class="log-controls">
+          <input id="logSearch" placeholder="🔍 Search events, contestants, roles…" />
+          <div id="logFilters" class="chips"></div>
+        </div>
+        <button id="logNew" class="log-new" hidden>⬆ 0 new events — resume live</button>
+        <ul id="activityLog" class="feed log live-log"></ul>
       </article>
     </section>
   </main>

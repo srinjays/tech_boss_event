@@ -1,11 +1,70 @@
 /* =========================================================
    BIG BOSS COMMAND CENTER — app.js
-   Architecture: single state store → actions mutate state →
-   commit() persists + re-renders every component.
+   Architecture: single state store → actions (permission-checked)
+   mutate state → commit() persists, broadcasts to other tabs and
+   re-renders every component.
    ========================================================= */
 
-const STORAGE_KEY = 'bigboss-command-center-v1';
+const STORAGE_KEY = 'bigboss-command-center-v2';
+const ROLE_KEY = 'bigboss-role';
+const TAB_ID = Math.random().toString(36).slice(2, 8);
 const TEAM_COLORS = { Alpha: '#7c5cff', Beta: '#00d4ff', Gamma: '#22e39b', Delta: '#ff8a3d' };
+
+/* ---------------- Role-based access control ---------------- */
+const PERMISSIONS = {
+  contestants: 'Add contestants',
+  points: 'Points',
+  tasks: 'Tasks',
+  timer: 'Timer',
+  announce: 'Broadcasts',
+  captain: 'Captaincy',
+  nominate: 'Nominations',
+  immunity: 'Immunity',
+  evict: 'Eviction',
+  log_clear: 'Clear log',
+  reset: 'Reset house',
+};
+const ROLES = {
+  bigboss: {
+    label: 'Big Boss', icon: '👁', color: '#ff3b5c', pin: '9999', level: 3,
+    desc: 'Supreme authority. Full control of the house.',
+    perms: Object.keys(PERMISSIONS),
+  },
+  producer: {
+    label: 'Producer', icon: '🎬', color: '#ffc940', pin: '2025', level: 2,
+    desc: 'Runs the show: tasks, timer, points and broadcasts.',
+    perms: ['contestants', 'points', 'tasks', 'timer', 'announce'],
+  },
+  moderator: {
+    label: 'Moderator', icon: '⚖️', color: '#22e39b', pin: '1234', level: 2,
+    desc: 'Handles house politics: captaincy, nominations, immunity.',
+    perms: ['captain', 'nominate', 'immunity', 'timer'],
+  },
+  viewer: {
+    label: 'Viewer', icon: '👀', color: '#00d4ff', pin: null, level: 0,
+    desc: 'Read-only monitoring of the live house.',
+    perms: [],
+  },
+};
+let currentRole = ROLES[sessionStorage.getItem(ROLE_KEY)] ? sessionStorage.getItem(ROLE_KEY) : 'bigboss';
+const role = () => ROLES[currentRole];
+const can = (perm) => role().perms.includes(perm);
+const rolesWith = (perm) => Object.values(ROLES).filter((r) => r.perms.includes(perm)).map((r) => r.label);
+
+/* ---------------- Activity log categories ---------------- */
+const LOG_TYPES = {
+  points: { label: 'Points', icon: '💎', color: '#7c5cff' },
+  task: { label: 'Tasks', icon: '📋', color: '#00d4ff' },
+  captain: { label: 'Captaincy', icon: '👑', color: '#ffc940' },
+  nomination: { label: 'Nominations', icon: '🎯', color: '#ff3b5c' },
+  immunity: { label: 'Immunity', icon: '🛡', color: '#22e39b' },
+  eviction: { label: 'Evictions', icon: '🚪', color: '#ff6b81' },
+  announce: { label: 'Broadcasts', icon: '📢', color: '#c45cff' },
+  timer: { label: 'Timer', icon: '⏱', color: '#4dd0e1' },
+  contestant: { label: 'Contestants', icon: '👥', color: '#8a8fb3' },
+  access: { label: 'Access', icon: '🔐', color: '#ff8a3d' },
+  system: { label: 'System', icon: '⚙', color: '#8a8fb3' },
+};
 
 /* ---------------- Seed data ---------------- */
 function seedState() {
@@ -24,7 +83,8 @@ function seedState() {
     ],
     nextTaskId: 3,
     announcements: [],
-    activity: [{ text: 'Command Center online. Tech House is LIVE.', time: Date.now() }],
+    activity: [{ id: 1, text: 'Command Center online. Tech House is LIVE.', type: 'system', role: 'system', tab: 'boot', time: Date.now() }],
+    nextLogId: 2,
     evictions: [],
     timer: { duration: 300, remaining: 300, status: 'ready', taskId: null },
   };
@@ -38,7 +98,7 @@ function load() {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (s && s.contestants) {
-      if (s.timer.status === 'running') s.timer.status = 'paused'; // resume safely after reload
+      if (s.timer.status === 'running' && !otherConsolesOnline()) s.timer.status = 'paused';
       return s;
     }
   } catch (e) { /* ignore */ }
@@ -58,6 +118,14 @@ const fmtTime = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', min
 const teamColor = (t) => TEAM_COLORS[t] || '#c45cff';
 const teamTag = (t) => `<span class="team" style="background:${teamColor(t)}22;color:${teamColor(t)}">${esc(t)}</span>`;
 
+function relTime(t) {
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 5) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
 function primaryStatus(c) {
   if (c.evicted) return 'Evicted';
   if (c.captain) return 'Captain';
@@ -75,10 +143,10 @@ function badges(c) {
   return b;
 }
 
-function log(text) {
-  state.activity.unshift({ text, time: Date.now() });
-  state.activity = state.activity.slice(0, 60);
-  $('tickerInner').textContent = '🔴 LIVE · ' + text;
+function log(text, type = 'system') {
+  state.activity.unshift({ id: state.nextLogId++, text, type, role: currentRole, tab: TAB_ID, time: Date.now() });
+  state.activity = state.activity.slice(0, 200);
+  $('tickerInner').textContent = `🔴 LIVE · ${text}`;
 }
 function toast(msg, type = '') {
   const el = document.createElement('div');
@@ -89,6 +157,16 @@ function toast(msg, type = '') {
 }
 function commit() { save(); render(); }
 
+/** Action-layer permission guard — UI locking alone is never trusted. */
+function requirePerm(perm) {
+  if (can(perm)) return true;
+  const msg = `${role().label} attempted "${PERMISSIONS[perm]}" — ACCESS DENIED.`;
+  toast(`🔒 ${PERMISSIONS[perm]} requires: ${rolesWith(perm).join(' / ')}`, 'error');
+  log(msg, 'access');
+  commit();
+  return false;
+}
+
 function guardActive(c, action) {
   if (!c) { toast('Select a contestant first.', 'error'); return false; }
   if (c.evicted) { toast(`${c.name} is evicted — cannot ${action}.`, 'error'); return false; }
@@ -98,109 +176,123 @@ function guardActive(c, action) {
 /* ---------------- Actions ---------------- */
 const Actions = {
   addContestant(name, team, points) {
+    if (!requirePerm('contestants')) return;
     name = name.trim(); team = team.trim();
     if (!name || !team) return;
     if (state.contestants.some((c) => c.name.toLowerCase() === name.toLowerCase() && !c.evicted)) {
       return toast('A contestant with that name is already in the house.', 'error');
     }
     state.contestants.push({ id: state.nextId++, name, team, points: Number(points) || 0, captain: false, immune: false, nominated: false, evicted: false });
-    log(`${name} entered the house (Team ${team}).`);
+    log(`${name} entered the house (Team ${team}).`, 'contestant');
     toast(`${name} added to the house`, 'success');
     commit();
   },
 
   changePoints(id, delta) {
+    if (!requirePerm('points')) return;
     const c = byId(id);
     if (!guardActive(c, 'receive points')) return;
     delta = Number(delta);
     if (!delta) return toast('Enter a valid amount.', 'error');
     c.points = Math.max(0, c.points + delta);
-    log(`${delta > 0 ? '+' : ''}${delta} points ${delta > 0 ? 'to' : 'from'} ${c.name} (now ${c.points}).`);
+    log(`${delta > 0 ? '+' : ''}${delta} points ${delta > 0 ? 'to' : 'from'} ${c.name} (now ${c.points}).`, 'points');
     toast(`${c.name}: ${delta > 0 ? '+' : ''}${delta} pts`, delta > 0 ? 'success' : 'error');
     commit();
   },
 
   setCaptain(id) {
+    if (!requirePerm('captain')) return;
     const c = byId(id);
     if (!guardActive(c, 'become Captain')) return;
     if (c.captain) return toast(`${c.name} is already Captain.`);
     const prev = captain();
     state.contestants.forEach((x) => (x.captain = false)); // only one captain
     c.captain = true;
-    log(prev ? `Captaincy transferred: ${prev.name} → ${c.name}.` : `${c.name} is the new House Captain.`);
+    log(prev ? `Captaincy transferred: ${prev.name} → ${c.name}.` : `${c.name} is the new House Captain.`, 'captain');
     toast(`👑 ${c.name} is now House Captain`, 'gold');
     commit();
   },
   removeCaptain() {
+    if (!requirePerm('captain')) return;
     const c = captain();
     if (!c) return toast('There is no Captain right now.', 'error');
     c.captain = false;
-    log(`${c.name} was removed from captaincy.`);
+    log(`${c.name} was removed from captaincy.`, 'captain');
     commit();
   },
 
   nominate(id) {
+    if (!requirePerm('nominate')) return;
     const c = byId(id);
     if (!guardActive(c, 'be nominated')) return;
-    if (c.immune) return toast(`🛡 ${c.name} has immunity and cannot be nominated!`, 'error');
+    if (c.immune) {
+      log(`Nomination of ${c.name} blocked — contestant is immune.`, 'nomination');
+      commit();
+      return toast(`🛡 ${c.name} has immunity and cannot be nominated!`, 'error');
+    }
     if (c.nominated) return toast(`${c.name} is already nominated.`);
     c.nominated = true;
-    log(`${c.name} has been NOMINATED for eviction.`);
+    log(`${c.name} has been NOMINATED for eviction.`, 'nomination');
     toast(`🎯 ${c.name} nominated`, 'error');
     commit();
   },
   cancelNomination(id) {
+    if (!requirePerm('nominate')) return;
     const c = byId(id);
     if (!c || !c.nominated) return toast('That contestant is not nominated.', 'error');
     c.nominated = false;
-    log(`Nomination cancelled for ${c.name}.`);
+    log(`Nomination cancelled for ${c.name}.`, 'nomination');
     toast(`${c.name} is safe`, 'success');
     commit();
   },
 
   grantImmunity(id) {
+    if (!requirePerm('immunity')) return;
     const c = byId(id);
     if (!guardActive(c, 'receive immunity')) return;
     if (c.immune) return toast(`${c.name} is already immune.`);
     c.immune = true;
     let msg = `${c.name} has been granted IMMUNITY.`;
     if (c.nominated) { c.nominated = false; msg += ' Nomination voided.'; }
-    log(msg);
+    log(msg, 'immunity');
     toast(`🛡 ${c.name} is immune`, 'success');
     commit();
   },
   revokeImmunity(id) {
+    if (!requirePerm('immunity')) return;
     const c = byId(id);
     if (!c || !c.immune) return toast('That contestant is not immune.', 'error');
     c.immune = false;
-    log(`Immunity revoked from ${c.name}.`);
+    log(`Immunity revoked from ${c.name}.`, 'immunity');
     commit();
   },
 
   evict(id) {
+    if (!requirePerm('evict')) return;
     const c = byId(id);
     if (!guardActive(c, 'be evicted')) return;
     if (!confirm(`Big Boss, confirm eviction of ${c.name}?`)) return;
     const wasCaptain = c.captain;
     Object.assign(c, { evicted: true, captain: false, nominated: false, immune: false });
     state.evictions.unshift({ id: c.id, name: c.name, team: c.team, points: c.points, wasCaptain, time: Date.now() });
-    // Remove pending individual tasks of evicted contestant
     state.tasks = state.tasks.filter((t) => t.done || t.assignee !== 'c:' + c.id);
-    log(`🚪 ${c.name} has been EVICTED from the Tech House.`);
+    log(`${c.name} has been EVICTED from the Tech House.`, 'eviction');
     toast(`🚪 ${c.name} evicted`, 'error');
     commit();
   },
 
   createTask(title, assignee, reward) {
+    if (!requirePerm('tasks')) return;
     title = title.trim();
     if (!title || !assignee) return toast('Task name and assignee required.', 'error');
     if (assignee.startsWith('c:') && !guardActive(byId(assignee.slice(2)), 'receive tasks')) return;
     state.tasks.unshift({ id: state.nextTaskId++, title, assignee, reward: Math.max(0, Number(reward) || 0), done: false, createdAt: Date.now() });
-    log(`New task "${title}" assigned to ${assigneeLabel(assignee)}.`);
+    log(`New task "${title}" assigned to ${assigneeLabel(assignee)}.`, 'task');
     toast('📋 Task assigned', 'success');
     commit();
   },
   completeTask(id) {
+    if (!requirePerm('tasks')) return;
     const t = state.tasks.find((x) => x.id === id);
     if (!t || t.done) return;
     t.done = true; t.completedAt = Date.now();
@@ -208,24 +300,45 @@ const Actions = {
       ? active().filter((c) => c.team === t.assignee.slice(2))
       : [byId(t.assignee.slice(2))].filter((c) => c && !c.evicted);
     winners.forEach((c) => (c.points += t.reward));
-    if (state.timer.taskId === id) Timer.reset();
-    log(`✅ Task "${t.title}" completed by ${assigneeLabel(t.assignee)}${t.reward ? ` (+${t.reward} pts each)` : ''}.`);
+    if (state.timer.taskId === id) Timer.reset(true);
+    log(`Task "${t.title}" completed by ${assigneeLabel(t.assignee)}${t.reward ? ` (+${t.reward} pts each)` : ''}.`, 'task');
     toast(`✅ "${t.title}" completed`, 'success');
     commit();
   },
   deleteTask(id) {
-    state.tasks = state.tasks.filter((t) => t.id !== id);
+    if (!requirePerm('tasks')) return;
+    const t = state.tasks.find((x) => x.id === id);
+    state.tasks = state.tasks.filter((x) => x.id !== id);
     if (state.timer.taskId === id) state.timer.taskId = null;
+    if (t) log(`Task "${t.title}" was deleted.`, 'task');
     commit();
   },
 
   broadcast(text) {
+    if (!requirePerm('announce')) return;
     text = text.trim();
     if (!text) return toast('Type an announcement first.', 'error');
-    state.announcements.unshift({ text, time: Date.now() });
-    log(`📢 Big Boss broadcast: "${text}"`);
+    state.announcements.unshift({ text, time: Date.now(), role: currentRole });
+    log(`Broadcast: "${text}"`, 'announce');
     commit();
     showBroadcast(text);
+  },
+
+  clearLog() {
+    if (!requirePerm('log_clear')) return;
+    if (!confirm('Clear the entire activity log?')) return;
+    state.activity = [];
+    log(`Activity log cleared by ${role().label}.`, 'system');
+    commit();
+  },
+
+  reset() {
+    if (!requirePerm('reset')) return;
+    if (!confirm('Reset the Command Center to demo data?')) return;
+    clearInterval(timerInterval);
+    state = seedState(); prevPoints = {};
+    log(`House reset to demo data by ${role().label}.`, 'system');
+    commit(); toast('Demo data restored', 'success');
   },
 };
 
@@ -237,15 +350,16 @@ function assigneeLabel(a) {
 
 /* ---------------- Timer ---------------- */
 const Timer = {
+  minutes: () => Math.max(1, Math.min(99, Number($('timerMinutes').value) || 5)),
   start() {
+    if (!requirePerm('timer')) return;
     const t = state.timer;
     if (t.status === 'running') return;
-    if (t.status === 'finished' || t.status === 'ready') {
-      const mins = Math.max(1, Math.min(99, Number($('timerMinutes').value) || 5));
-      if (t.status === 'finished' || t.remaining === t.duration) { t.duration = mins * 60; t.remaining = t.duration; }
+    if (t.status === 'finished' || (t.status === 'ready' && t.remaining === t.duration)) {
+      t.duration = this.minutes() * 60; t.remaining = t.duration;
     }
     t.status = 'running';
-    log(`⏱ Task timer started (${fmtClock(t.remaining)} left).`);
+    log(`Task timer started (${fmtClock(t.remaining)} left).`, 'timer');
     this.tick();
     commit();
   },
@@ -253,33 +367,39 @@ const Timer = {
     clearInterval(timerInterval);
     timerInterval = setInterval(() => {
       const t = state.timer;
+      if (t.status !== 'running') return clearInterval(timerInterval);
       t.remaining = Math.max(0, t.remaining - 1);
       if (t.remaining === 0) {
         clearInterval(timerInterval);
         t.status = 'finished';
-        log('⏰ TIME UP! Task timer finished.');
+        log('TIME UP! Task timer finished.', 'timer');
         toast('⏰ Time is up!', 'error');
         commit();
       } else { save(); renderTimer(); }
     }, 1000);
   },
   pause() {
+    if (!requirePerm('timer')) return;
     if (state.timer.status !== 'running') return toast('Timer is not running.', 'error');
     clearInterval(timerInterval);
     state.timer.status = 'paused';
-    log('⏸ Task timer paused.');
+    log(`Task timer paused at ${fmtClock(state.timer.remaining)}.`, 'timer');
     commit();
   },
-  reset() {
+  /** internal=true skips permission check (used by task completion). */
+  reset(internal = false) {
+    if (!internal && !requirePerm('timer')) return false;
     clearInterval(timerInterval);
-    const mins = Math.max(1, Math.min(99, Number($('timerMinutes').value) || 5));
-    Object.assign(state.timer, { duration: mins * 60, remaining: mins * 60, status: 'ready' });
-    save(); renderTimer();
+    const m = this.minutes();
+    Object.assign(state.timer, { duration: m * 60, remaining: m * 60, status: 'ready' });
+    return true;
   },
   linkTask(id) {
-    state.timer.taskId = id;
+    if (!requirePerm('timer')) return;
     const t = state.tasks.find((x) => x.id === id);
-    this.reset();
+    this.reset(true);
+    state.timer.taskId = id;
+    log(`Timer linked to task "${t.title}".`, 'timer');
     toast(`⏱ Timer linked to "${t.title}"`);
     commit();
     $('timerCard').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -297,8 +417,91 @@ function showBroadcast(text) {
 }
 function hideBroadcast() { $('broadcastOverlay').classList.remove('show'); }
 
+/* ---------------- Role switching UI ---------------- */
+let pendingRole = null;
+function openRoleModal() {
+  pendingRole = currentRole;
+  renderRoleGrid();
+  $('roleOverlay').classList.add('show');
+}
+function closeRoleModal() { $('roleOverlay').classList.remove('show'); $('pinInput').value = ''; }
+function renderRoleGrid() {
+  $('roleGrid').innerHTML = Object.entries(ROLES).map(([key, r]) => `
+    <button type="button" class="role-card ${key === pendingRole ? 'selected' : ''} ${key === currentRole ? 'current' : ''}"
+      data-role="${key}" style="--rc:${r.color}">
+      <div class="rn">${r.icon} ${r.label} ${r.pin ? '🔒' : ''}</div>
+      <div class="rd">${r.desc}</div>
+      <div class="perm-list">${Object.entries(PERMISSIONS).map(([p, l]) => `<span class="${r.perms.includes(p) ? 'on' : ''}">${l}</span>`).join('')}</div>
+    </button>`).join('');
+  const target = ROLES[pendingRole];
+  const needsPin = target.pin && target.level > role().level;
+  $('pinInput').style.display = needsPin ? '' : 'none';
+  $('pinSubmit').textContent = pendingRole === currentRole ? 'Stay' : needsPin ? `Unlock ${target.label}` : `Switch to ${target.label}`;
+  if (needsPin) setTimeout(() => $('pinInput').focus(), 50);
+}
+function switchRole(e) {
+  e.preventDefault();
+  const target = ROLES[pendingRole];
+  if (pendingRole === currentRole) return closeRoleModal();
+  const needsPin = target.pin && target.level > role().level;
+  if (needsPin && $('pinInput').value !== target.pin) {
+    $('pinForm').classList.remove('shake'); void $('pinForm').offsetWidth; $('pinForm').classList.add('shake');
+    toast('❌ Incorrect PIN', 'error');
+    log(`Failed PIN attempt for ${target.label} access (from ${role().label}).`, 'access');
+    commit();
+    return;
+  }
+  const from = role().label;
+  currentRole = pendingRole;
+  sessionStorage.setItem(ROLE_KEY, currentRole);
+  log(`Console switched role: ${from} → ${target.label}.`, 'access');
+  toast(`${target.icon} Now operating as ${target.label}`, 'success');
+  closeRoleModal();
+  announcePresence();
+  commit();
+}
+
+/* ---------------- Multi-console presence (BroadcastChannel) ---------------- */
+const consoles = new Map(); // tabId -> { role, seen }
+const channel = 'BroadcastChannel' in window ? new BroadcastChannel('bigboss-presence') : null;
+function announcePresence(type = 'ping') { channel?.postMessage({ type, tab: TAB_ID, role: currentRole }); }
+function otherConsolesOnline() {
+  const now = Date.now();
+  return [...consoles.values()].some((c) => now - c.seen < 5000);
+}
+if (channel) {
+  channel.onmessage = ({ data }) => {
+    if (data.type === 'bye') consoles.delete(data.tab);
+    else consoles.set(data.tab, { role: data.role, seen: Date.now() });
+    if (data.type === 'hello') announcePresence();
+    renderPresence();
+  };
+  window.addEventListener('beforeunload', () => announcePresence('bye'));
+}
+function renderPresence() {
+  const now = Date.now();
+  for (const [k, v] of consoles) if (now - v.seen > 6000) consoles.delete(k);
+  const all = [{ role: currentRole }, ...consoles.values()];
+  const el = $('hConsoles');
+  el.textContent = `🖥 ${all.length} console${all.length > 1 ? 's' : ''}`;
+  el.title = 'Live consoles: ' + all.map((c, i) => `${ROLES[c.role]?.label || c.role}${i === 0 ? ' (you)' : ''}`).join(', ');
+  el.classList.toggle('on', all.length > 1);
+}
+
+/* Cross-tab state sync: any change in another console is applied instantly */
+window.addEventListener('storage', (e) => {
+  if (e.key !== STORAGE_KEY || !e.newValue) return;
+  const lastAnnounce = state.announcements[0]?.time;
+  state = JSON.parse(e.newValue);
+  if (state.timer.status !== 'running') clearInterval(timerInterval);
+  const top = state.announcements[0];
+  if (top && top.time !== lastAnnounce && Date.now() - top.time < 5000) showBroadcast(top.text);
+  render();
+});
+
 /* ---------------- Rendering ---------------- */
 function render() {
+  applyAccess();
   renderHeader();
   renderLeaderboard();
   renderContestants();
@@ -308,7 +511,22 @@ function render() {
   renderStats();
   renderTimer();
   renderFeeds();
+  renderLog();
   prevPoints = Object.fromEntries(state.contestants.map((c) => [c.id, c.points]));
+}
+
+function applyAccess() {
+  const r = role();
+  const btn = $('roleBtn');
+  btn.textContent = `${r.icon} ${r.label} ▾`;
+  btn.style.setProperty('--role-color', r.color);
+  document.body.dataset.role = currentRole;
+  document.querySelectorAll('[data-perm]').forEach((el) => {
+    const ok = can(el.dataset.perm);
+    el.classList.toggle('locked', !ok);
+    el.dataset.lockLabel = `🔒 ${rolesWith(el.dataset.perm).join(' / ')}`;
+    el.querySelectorAll('input, select, textarea, button').forEach((i) => (i.tabIndex = ok ? 0 : -1));
+  });
 }
 
 function renderHeader() {
@@ -344,17 +562,22 @@ function renderContestants() {
   const list = [...state.contestants].sort((a, b) => a.evicted - b.evicted || b.points - a.points);
   $('contestantCount').textContent = `${active().length} active / ${state.contestants.length} total`;
   $('contestantTable').innerHTML = list.map((c) => {
-    const acts = c.evicted ? '<span class="t-meta">No actions — evicted</span>' : `
-      <button class="btn btn-green xs" data-act="pts" data-id="${c.id}" data-v="50">+50</button>
-      <button class="btn btn-red xs" data-act="pts" data-id="${c.id}" data-v="-50">−50</button>
-      <button class="btn btn-gold xs" data-act="cap" data-id="${c.id}" ${c.captain ? 'disabled' : ''}>👑</button>
-      ${c.nominated
+    let acts = '';
+    if (c.evicted) acts = '<span class="t-meta">No actions — evicted</span>';
+    else {
+      if (can('points')) acts += `
+        <button class="btn btn-green xs" data-act="pts" data-id="${c.id}" data-v="50">+50</button>
+        <button class="btn btn-red xs" data-act="pts" data-id="${c.id}" data-v="-50">−50</button>`;
+      if (can('captain')) acts += `<button class="btn btn-gold xs" data-act="cap" data-id="${c.id}" ${c.captain ? 'disabled' : ''} title="Make Captain">👑</button>`;
+      if (can('nominate')) acts += c.nominated
         ? `<button class="btn btn-ghost xs" data-act="unnom" data-id="${c.id}">Un-nominate</button>`
-        : `<button class="btn btn-red xs" data-act="nom" data-id="${c.id}" ${c.immune ? 'disabled title="Immune — cannot nominate"' : ''}>🎯</button>`}
-      ${c.immune
-        ? `<button class="btn btn-ghost xs" data-act="unimm" data-id="${c.id}">−🛡</button>`
-        : `<button class="btn btn-green xs" data-act="imm" data-id="${c.id}">🛡</button>`}
-      <button class="btn btn-ghost xs" data-act="evict" data-id="${c.id}">🚪</button>`;
+        : `<button class="btn btn-red xs" data-act="nom" data-id="${c.id}" ${c.immune ? 'disabled title="Immune — cannot nominate"' : 'title="Nominate"'}>🎯</button>`;
+      if (can('immunity')) acts += c.immune
+        ? `<button class="btn btn-ghost xs" data-act="unimm" data-id="${c.id}" title="Revoke immunity">−🛡</button>`
+        : `<button class="btn btn-green xs" data-act="imm" data-id="${c.id}" title="Grant immunity">🛡</button>`;
+      if (can('evict')) acts += `<button class="btn btn-ghost xs" data-act="evict" data-id="${c.id}" title="Evict">🚪</button>`;
+      if (!acts) acts = '<span class="view-only">👀 View only</span>';
+    }
     return `<tr class="${c.evicted ? 'evicted' : ''} ${c.captain ? 'captain' : ''}">
       <td>${c.captain ? '👑 ' : ''}${esc(c.name)}</td><td>${teamTag(c.team)}</td>
       <td><strong>${c.points}</strong></td><td title="${primaryStatus(c)}">${badges(c)}</td>
@@ -367,15 +590,16 @@ function renderTasks() {
   const act = state.tasks.filter((t) => !t.done);
   const done = state.tasks.filter((t) => t.done).sort((a, b) => b.completedAt - a.completedAt);
   $('taskCount').textContent = `${act.length} active · ${done.length} done`;
-  $('activeTasks').innerHTML = act.length ? act.map((t) => `
-    <li class="${state.timer.taskId === t.id ? 'timed' : ''}">
+  $('activeTasks').innerHTML = act.length ? act.map((t) => {
+    let btns = '';
+    if (can('timer')) btns += `<button class="btn btn-ghost xs" data-task="timer" data-id="${t.id}" title="Link timer">⏱</button>`;
+    if (can('tasks')) btns += `<button class="btn btn-green xs" data-task="done" data-id="${t.id}">✓ Done</button>
+        <button class="btn btn-ghost xs" data-task="del" data-id="${t.id}" title="Delete">✕</button>`;
+    return `<li class="${state.timer.taskId === t.id ? 'timed' : ''}">
       <div><div class="t-title">${esc(t.title)}</div>
       <div class="t-meta">→ ${esc(assigneeLabel(t.assignee))} · 🏅 ${t.reward} pts</div></div>
-      <div class="actions">
-        <button class="btn btn-ghost xs" data-task="timer" data-id="${t.id}" title="Link timer">⏱</button>
-        <button class="btn btn-green xs" data-task="done" data-id="${t.id}">✓ Done</button>
-        <button class="btn btn-ghost xs" data-task="del" data-id="${t.id}" title="Delete">✕</button>
-      </div></li>`).join('') : '<li class="empty">No active tasks.</li>';
+      <div class="actions">${btns || '<span class="view-only">👀</span>'}</div></li>`;
+  }).join('') : '<li class="empty">No active tasks.</li>';
   $('completedTasks').innerHTML = done.length ? done.map((t) => `
     <li><div><div class="t-title">${esc(t.title)}</div>
     <div class="t-meta">${esc(assigneeLabel(t.assignee))} · +${t.reward} · ${fmtTime(t.completedAt)}</div></div><span>✅</span></li>`).join('')
@@ -414,18 +638,19 @@ function renderSelects() {
 function renderDangerZone() {
   const noms = ranked().filter((c) => c.nominated);
   $('dzCount').textContent = `${noms.length} nominee${noms.length === 1 ? '' : 's'}`;
-  $('dangerZone').innerHTML = noms.length ? noms.map((c) => `
-    <div class="dz-card">
+  $('dangerZone').innerHTML = noms.length ? noms.map((c) => {
+    let btns = '';
+    if (can('nominate')) btns += `<button class="btn btn-ghost xs" data-act="unnom" data-id="${c.id}">Save</button>`;
+    if (can('immunity')) btns += `<button class="btn btn-green xs" data-act="imm" data-id="${c.id}">🛡 Immunity</button>`;
+    if (can('evict')) btns += `<button class="btn btn-red xs" data-act="evict" data-id="${c.id}">🚪 Evict</button>`;
+    return `<div class="dz-card">
       <div class="nm">${c.captain ? '👑 ' : ''}${esc(c.name)}</div>
       ${teamTag(c.team)}
       <div class="pts">${c.points} pts</div>
       <div>${badges(c)}${c.immune ? '' : '<span class="badge b-evicted">No immunity</span>'}</div>
-      <div class="actions">
-        <button class="btn btn-ghost xs" data-act="unnom" data-id="${c.id}">Save</button>
-        <button class="btn btn-green xs" data-act="imm" data-id="${c.id}">🛡 Immunity</button>
-        <button class="btn btn-red xs" data-act="evict" data-id="${c.id}">🚪 Evict</button>
-      </div>
-    </div>`).join('') : '<div class="empty">The Danger Zone is clear. No nominations.</div>';
+      <div class="actions">${btns || '<span class="view-only">👀 View only</span>'}</div>
+    </div>`;
+  }).join('') : '<div class="empty">The Danger Zone is clear. No nominations.</div>';
 }
 
 function renderStats() {
@@ -464,13 +689,71 @@ function renderTimer() {
 
 function renderFeeds() {
   $('announceFeed').innerHTML = state.announcements.length ? state.announcements.map((a) =>
-    `<li><span class="time">${fmtTime(a.time)}</span>📢 ${esc(a.text)}</li>`).join('') : '<li class="empty">No announcements yet.</li>';
-  $('activityLog').innerHTML = state.activity.map((a) =>
-    `<li><span class="time">${fmtTime(a.time)}</span>${esc(a.text)}</li>`).join('');
+    `<li><span class="time">${fmtTime(a.time)}${a.role ? ' · ' + (ROLES[a.role]?.label || '') : ''}</span>📢 ${esc(a.text)}</li>`).join('') : '<li class="empty">No announcements yet.</li>';
   $('evictionHistory').innerHTML = state.evictions.length ? state.evictions.map((e) =>
     `<li><div><strong>${esc(e.name)}</strong> ${teamTag(e.team)} ${e.wasCaptain ? '<span class="badge b-captain">ex-captain</span>' : ''}
      <span class="time">${fmtTime(e.time)} · Final: ${e.points} pts</span></div><span class="badge b-evicted">Evicted</span></li>`).join('')
     : '<li class="empty">No evictions yet.</li>';
+}
+
+/* ---------------- Real-time activity log ---------------- */
+const logView = { filter: 'all', search: '', frozenAt: null, seen: new Set() };
+
+function filteredLog() {
+  const q = logView.search.toLowerCase();
+  return state.activity.filter((a) =>
+    (logView.filter === 'all' || a.type === logView.filter) &&
+    (logView.frozenAt === null || a.id <= logView.frozenAt) &&
+    (!q || a.text.toLowerCase().includes(q) || (ROLES[a.role]?.label || a.role).toLowerCase().includes(q) || (LOG_TYPES[a.type]?.label || '').toLowerCase().includes(q)));
+}
+
+function renderLog() {
+  // filter chips with live counts
+  const counts = state.activity.reduce((m, a) => ((m[a.type] = (m[a.type] || 0) + 1), m), {});
+  const chips = [['all', `All<b>${state.activity.length}</b>`]].concat(
+    Object.entries(LOG_TYPES).filter(([k]) => counts[k]).map(([k, t]) => [k, `${t.icon} ${t.label}<b>${counts[k]}</b>`]));
+  if (logView.filter !== 'all' && !counts[logView.filter]) logView.filter = 'all';
+  $('logFilters').innerHTML = chips.map(([k, l]) => `<button class="chip ${logView.filter === k ? 'active' : ''}" data-filter="${k}">${l}</button>`).join('');
+
+  const items = filteredLog();
+  $('logCount').textContent = `${state.activity.length} events`;
+  const pending = logView.frozenAt === null ? 0 : state.activity.filter((a) => a.id > logView.frozenAt).length;
+  $('logNew').hidden = !pending;
+  $('logNew').textContent = `⬆ ${pending} new event${pending === 1 ? '' : 's'} — resume live`;
+  $('activityCard').classList.toggle('frozen', logView.frozenAt !== null);
+  $('logFreeze').textContent = logView.frozenAt === null ? '⏸ Freeze' : '▶ Live';
+
+  $('activityLog').innerHTML = items.length ? items.map((a) => {
+    const t = LOG_TYPES[a.type] || LOG_TYPES.system;
+    const r = ROLES[a.role];
+    const fresh = !logView.seen.has(a.id) && logView.seen.size > 0;
+    return `<li class="${fresh ? 'fresh' : ''}" style="--lc:${t.color}">
+      <div class="li-icon">${t.icon}</div>
+      <div><div>${esc(a.text)}</div>
+        <div class="li-meta">
+          <span class="actor" style="--ac:${r ? r.color : '#8a8fb3'}">${r ? `${r.icon} ${r.label}` : '⚙ System'}</span>
+          <span class="cat">${t.label}</span>
+          ${a.tab !== TAB_ID && a.tab !== 'boot' ? '<span class="remote" title="Performed from another console">REMOTE</span>' : ''}
+        </div></div>
+      <div class="when"><span class="rel" data-t="${a.time}">${relTime(a.time)}</span><small>${fmtTime(a.time)}</small></div>
+    </li>`;
+  }).join('') : '<li class="empty">No events match.</li>';
+  state.activity.forEach((a) => logView.seen.add(a.id));
+  if (logView.seen.size === 0) logView.seen.add(-1); // first render done; subsequent new items animate
+}
+function tickLogTimes() {
+  document.querySelectorAll('#activityLog .rel').forEach((el) => (el.textContent = relTime(Number(el.dataset.t))));
+}
+function exportLog() {
+  const rows = [['Time', 'Category', 'Role', 'Event']].concat(filteredLog().map((a) =>
+    [new Date(a.time).toISOString(), LOG_TYPES[a.type]?.label || a.type, ROLES[a.role]?.label || a.role, a.text]));
+  const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `bigboss-activity-${Date.now()}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('⬇ Activity log exported', 'success');
 }
 
 /* ---------------- Event wiring ---------------- */
@@ -499,7 +782,7 @@ function wire() {
   $('revokeImmunity').onclick = () => Actions.revokeImmunity($('immunityTarget').value);
   $('evict').onclick = () => Actions.evict($('evictTarget').value);
 
-  $('broadcastBtn').onclick = () => { Actions.broadcast($('announceText').value); $('announceText').value = ''; };
+  $('broadcastBtn').onclick = () => { Actions.broadcast($('announceText').value); if (can('announce')) $('announceText').value = ''; };
   $('announceText').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('broadcastBtn').click(); }
   });
@@ -508,10 +791,37 @@ function wire() {
 
   $('timerStart').onclick = () => Timer.start();
   $('timerPause').onclick = () => Timer.pause();
-  $('timerReset').onclick = () => { Timer.reset(); log('⟲ Task timer reset.'); commit(); };
-  $('timerMinutes').addEventListener('change', () => { if (state.timer.status === 'ready' || state.timer.status === 'finished') Timer.reset(); });
+  $('timerReset').onclick = () => { if (Timer.reset()) { log('Task timer reset.', 'timer'); commit(); } };
+  $('timerMinutes').addEventListener('change', () => {
+    if (can('timer') && (state.timer.status === 'ready' || state.timer.status === 'finished')) { Timer.reset(true); commit(); }
+  });
 
-  // Delegated quick actions (table, danger zone)
+  // Role modal
+  $('roleBtn').onclick = openRoleModal;
+  $('roleClose').onclick = closeRoleModal;
+  $('roleOverlay').onclick = (e) => { if (e.target.id === 'roleOverlay') closeRoleModal(); };
+  $('roleGrid').onclick = (e) => {
+    const card = e.target.closest('[data-role]');
+    if (card) { pendingRole = card.dataset.role; $('pinInput').value = ''; renderRoleGrid(); }
+  };
+  $('pinForm').addEventListener('submit', switchRole);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeRoleModal(); hideBroadcast(); } });
+
+  // Activity log controls
+  $('logSearch').addEventListener('input', (e) => { logView.search = e.target.value; renderLog(); });
+  $('logFilters').onclick = (e) => {
+    const c = e.target.closest('[data-filter]');
+    if (c) { logView.filter = c.dataset.filter; renderLog(); }
+  };
+  $('logFreeze').onclick = () => {
+    logView.frozenAt = logView.frozenAt === null ? (state.activity[0]?.id ?? 0) : null;
+    renderLog();
+  };
+  $('logNew').onclick = () => { logView.frozenAt = null; renderLog(); };
+  $('logExport').onclick = exportLog;
+  $('logClear').onclick = () => Actions.clearLog();
+
+  // Delegated quick actions (table, danger zone, tasks)
   document.body.addEventListener('click', (e) => {
     const b = e.target.closest('[data-act]');
     if (b) {
@@ -534,18 +844,21 @@ function wire() {
     }
   });
 
-  $('resetData').onclick = () => {
-    if (!confirm('Reset the Command Center to demo data?')) return;
-    clearInterval(timerInterval);
-    state = seedState(); prevPoints = {};
-    commit(); toast('Demo data restored', 'success');
-  };
+  $('resetData').onclick = () => Actions.reset();
 
-  setInterval(() => { $('hClock').textContent = new Date().toLocaleTimeString(); renderHeader(); }, 1000);
+  setInterval(() => {
+    $('hClock').textContent = new Date().toLocaleTimeString();
+    renderHeader();
+    tickLogTimes();
+  }, 1000);
+  setInterval(() => { announcePresence(); renderPresence(); }, 2000);
 }
 
 /* ---------------- Boot ---------------- */
 wire();
+announcePresence('hello');
 $('timerMinutes').value = Math.round(state.timer.duration / 60);
 render();
-prevPoints = Object.fromEntries(state.contestants.map((c) => [c.id, c.points]));
+renderPresence();
+// If this console owns a running timer (e.g. single tab), keep it ticking
+if (state.timer.status === 'running') Timer.tick();
