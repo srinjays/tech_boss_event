@@ -66,6 +66,115 @@ const LOG_TYPES = {
   system: { label: 'System', icon: '⚙', color: '#8a8fb3' },
 };
 
+/* ---------------- Event Notification System ---------------- */
+const NOTIF_KEY = 'bigboss-notifications';
+const NOTIF_PREFS_KEY = 'bigboss-notif-prefs';
+
+// Priority map: which log types get which notification priority
+const NOTIF_PRIORITY = {
+  eviction: 'critical', nomination: 'high', captain: 'high', announce: 'high',
+  immunity: 'normal', points: 'normal', task: 'normal', timer: 'low',
+  contestant: 'low', access: 'low', system: 'low',
+};
+const PRIORITY_ORDER = { critical: 0, high: 1, normal: 2, low: 3 };
+const PRIORITY_LABELS = { critical: '🔴 Critical', high: '🟡 High', normal: '🔵 Normal', low: '⚪ Low' };
+
+// Sound frequencies for different priorities (Web Audio API)
+const NOTIF_SOUNDS = {
+  critical: [{ f: 880, d: 120 }, { f: 0, d: 60 }, { f: 880, d: 120 }, { f: 0, d: 60 }, { f: 1100, d: 200 }],
+  high: [{ f: 660, d: 150 }, { f: 880, d: 200 }],
+  normal: [{ f: 520, d: 180 }],
+  low: [{ f: 440, d: 100 }],
+};
+
+let notifications = loadNotifications();
+let notifPrefs = loadNotifPrefs();
+let notifPanelOpen = false;
+let notifFilter = 'all';
+let notifFreshIds = new Set();
+let audioCtx = null;
+
+function loadNotifications() {
+  try {
+    const n = JSON.parse(localStorage.getItem(NOTIF_KEY));
+    return Array.isArray(n) ? n.slice(0, 100) : [];
+  } catch (e) { return []; }
+}
+function saveNotifications() { localStorage.setItem(NOTIF_KEY, JSON.stringify(notifications)); }
+
+function defaultPrefs() {
+  const cats = {};
+  for (const [k, t] of Object.entries(LOG_TYPES)) {
+    cats[k] = { enabled: true, priority: NOTIF_PRIORITY[k] || 'normal' };
+  }
+  return { cats, sound: true, browser: false, dnd: false };
+}
+function loadNotifPrefs() {
+  try {
+    const p = JSON.parse(sessionStorage.getItem(NOTIF_PREFS_KEY));
+    if (p && p.cats) return p;
+  } catch (e) { /* ignore */ }
+  return defaultPrefs();
+}
+function saveNotifPrefs() { sessionStorage.setItem(NOTIF_PREFS_KEY, JSON.stringify(notifPrefs)); }
+
+/** Create a notification from a log entry */
+function emitNotification(logEntry) {
+  const catPref = notifPrefs.cats[logEntry.type];
+  if (!catPref || !catPref.enabled) return;
+  if (notifPrefs.dnd) return;
+
+  const lt = LOG_TYPES[logEntry.type] || LOG_TYPES.system;
+  const priority = catPref.priority || NOTIF_PRIORITY[logEntry.type] || 'normal';
+  const notif = {
+    id: 'n' + Date.now() + Math.random().toString(36).slice(2, 5),
+    logId: logEntry.id, text: logEntry.text, type: logEntry.type,
+    icon: lt.icon, priority, role: logEntry.role,
+    read: false, time: logEntry.time,
+  };
+  notifications.unshift(notif);
+  notifications = notifications.slice(0, 100);
+  notifFreshIds.add(notif.id);
+  saveNotifications();
+
+  // Play sound
+  if (notifPrefs.sound) playNotifSound(priority);
+
+  // Browser push notification
+  if (notifPrefs.browser && 'Notification' in window && Notification.permission === 'granted') {
+    try {
+      new Notification(`${lt.icon} ${lt.label} — Big Boss Command Center`, {
+        body: logEntry.text, icon: '👁', tag: notif.id, silent: true,
+      });
+    } catch (e) { /* not all contexts support Notification constructor */ }
+  }
+
+  // Update badge immediately
+  renderNotifBadge();
+}
+
+/** Web Audio API sound synthesis — no external files needed */
+function playNotifSound(priority) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const tones = NOTIF_SOUNDS[priority] || NOTIF_SOUNDS.normal;
+    let startTime = audioCtx.currentTime;
+    for (const tone of tones) {
+      if (tone.f === 0) { startTime += tone.d / 1000; continue; }
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = priority === 'critical' ? 'square' : 'sine';
+      osc.frequency.value = tone.f;
+      gain.gain.setValueAtTime(0.12, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + tone.d / 1000);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + tone.d / 1000);
+      startTime += tone.d / 1000;
+    }
+  } catch (e) { /* Audio not available */ }
+}
+
 /* ---------------- Seed data ---------------- */
 function seedState() {
   const seed = [
@@ -144,9 +253,12 @@ function badges(c) {
 }
 
 function log(text, type = 'system') {
-  state.activity.unshift({ id: state.nextLogId++, text, type, role: currentRole, tab: TAB_ID, time: Date.now() });
+  const entry = { id: state.nextLogId++, text, type, role: currentRole, tab: TAB_ID, time: Date.now() };
+  state.activity.unshift(entry);
   state.activity = state.activity.slice(0, 200);
   $('tickerInner').textContent = `🔴 LIVE · ${text}`;
+  // Emit notification for this event
+  emitNotification(entry);
 }
 function toast(msg, type = '') {
   const el = document.createElement('div');
@@ -512,6 +624,8 @@ function render() {
   renderTimer();
   renderFeeds();
   renderLog();
+  renderNotifBadge();
+  if (notifPanelOpen) renderNotifPanel();
   prevPoints = Object.fromEntries(state.contestants.map((c) => [c.id, c.points]));
 }
 
@@ -854,8 +968,193 @@ function wire() {
   setInterval(() => { announcePresence(); renderPresence(); }, 2000);
 }
 
+/* ---------------- Notification panel rendering ---------------- */
+function renderNotifBadge() {
+  const unread = notifications.filter((n) => !n.read).length;
+  const badge = $('notifBadge');
+  badge.hidden = unread === 0;
+  badge.textContent = unread > 99 ? '99+' : unread;
+  $('notifBell').classList.toggle('has-unread', unread > 0);
+}
+
+function renderNotifPanel() {
+  // Filters
+  const priorities = ['all', 'critical', 'high', 'normal', 'low'];
+  const counts = notifications.reduce((m, n) => ((m[n.priority] = (m[n.priority] || 0) + 1), m), {});
+  $('notifFilters').innerHTML = priorities.map((p) => {
+    const cnt = p === 'all' ? notifications.length : (counts[p] || 0);
+    const label = p === 'all' ? `All <b>${cnt}</b>` : `${PRIORITY_LABELS[p]} <b>${cnt}</b>`;
+    return `<button class="chip ${notifFilter === p ? 'active' : ''}" data-nfilter="${p}">${label}</button>`;
+  }).join('');
+
+  // Filtered list
+  const filtered = notifFilter === 'all' ? notifications : notifications.filter((n) => n.priority === notifFilter);
+  const list = $('notifList');
+
+  if (!filtered.length) {
+    list.innerHTML = `<li class="notif-empty">${notifications.length ? 'No notifications in this filter.' : '🔔 No notifications yet.<br>Events will appear here in real time.'}</li>`;
+  } else {
+    list.innerHTML = filtered.map((n) => {
+      const r = ROLES[n.role];
+      const isFresh = notifFreshIds.has(n.id);
+      return `<li class="${n.read ? '' : 'unread'} p-${n.priority} ${isFresh ? 'fresh-notif' : ''}" data-nid="${n.id}">
+        <div class="ni-icon">${n.icon}</div>
+        <div class="ni-text">
+          <div>${esc(n.text)}</div>
+          <div class="ni-sub">
+            <span class="actor" style="--ac:${r ? r.color : '#8a8fb3'}">${r ? r.icon + ' ' + r.label : '⚙ System'}</span>
+            <span>${LOG_TYPES[n.type]?.label || n.type}</span>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
+          <span class="ni-time">${relTime(n.time)}</span>
+          <button class="ni-dismiss" data-ndismiss="${n.id}" title="Dismiss">✕</button>
+        </div>
+      </li>`;
+    }).join('');
+  }
+  notifFreshIds.clear();
+
+  // Footer
+  const unread = notifications.filter((n) => !n.read).length;
+  $('notifSummary').textContent = `${unread} unread · ${notifications.length} total`;
+
+  // Browser notification permission button
+  const permBtn = $('notifBrowserPerm');
+  if ('Notification' in window && Notification.permission === 'default') {
+    permBtn.hidden = false;
+  } else {
+    permBtn.hidden = true;
+  }
+}
+
+function renderNotifPrefs() {
+  $('notifPrefsGrid').innerHTML = Object.entries(LOG_TYPES).map(([k, t]) => {
+    const pref = notifPrefs.cats[k] || { enabled: true, priority: 'normal' };
+    return `<div class="pref-row">
+      <input type="checkbox" data-npref="${k}" ${pref.enabled ? 'checked' : ''} />
+      <span class="prow-icon">${t.icon}</span>
+      <span class="prow-label">${t.label}</span>
+      <select data-nprio="${k}">
+        ${Object.entries(PRIORITY_LABELS).map(([p, l]) => `<option value="${p}" ${pref.priority === p ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>`;
+  }).join('');
+  $('prefSound').checked = notifPrefs.sound;
+  $('prefBrowser').checked = notifPrefs.browser;
+  $('prefDND').checked = notifPrefs.dnd;
+}
+
+/* ---------------- Notification event wiring ---------------- */
+function wireNotifications() {
+  // Bell toggle
+  $('notifBell').onclick = (e) => {
+    e.stopPropagation();
+    notifPanelOpen = !notifPanelOpen;
+    $('notifPanel').hidden = !notifPanelOpen;
+    if (notifPanelOpen) renderNotifPanel();
+  };
+
+  // Close panel on outside click
+  document.addEventListener('click', (e) => {
+    if (notifPanelOpen && !e.target.closest('.notif-wrap')) {
+      notifPanelOpen = false;
+      $('notifPanel').hidden = true;
+    }
+  });
+
+  // Mark all read
+  $('notifMarkAll').onclick = () => {
+    notifications.forEach((n) => (n.read = true));
+    saveNotifications();
+    renderNotifBadge();
+    renderNotifPanel();
+    toast('All notifications marked as read', 'success');
+  };
+
+  // Clear all
+  $('notifClearAll').onclick = () => {
+    notifications = [];
+    saveNotifications();
+    renderNotifBadge();
+    renderNotifPanel();
+    toast('Notifications cleared');
+  };
+
+  // Click notification to mark read / dismiss
+  $('notifList').addEventListener('click', (e) => {
+    const dismiss = e.target.closest('[data-ndismiss]');
+    if (dismiss) {
+      notifications = notifications.filter((n) => n.id !== dismiss.dataset.ndismiss);
+      saveNotifications();
+      renderNotifBadge();
+      renderNotifPanel();
+      return;
+    }
+    const li = e.target.closest('[data-nid]');
+    if (li) {
+      const n = notifications.find((x) => x.id === li.dataset.nid);
+      if (n) { n.read = true; saveNotifications(); renderNotifBadge(); renderNotifPanel(); }
+    }
+  });
+
+  // Filter chips
+  $('notifFilters').addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-nfilter]');
+    if (chip) { notifFilter = chip.dataset.nfilter; renderNotifPanel(); }
+  });
+
+  // Browser notification permission
+  $('notifBrowserPerm').onclick = async () => {
+    if ('Notification' in window) {
+      const perm = await Notification.requestPermission();
+      if (perm === 'granted') {
+        notifPrefs.browser = true;
+        saveNotifPrefs();
+        toast('🌐 Browser notifications enabled', 'success');
+      } else {
+        toast('Browser notifications denied', 'error');
+      }
+      renderNotifPanel();
+    }
+  };
+
+  // Preferences modal
+  $('notifPrefsBtn').onclick = () => {
+    renderNotifPrefs();
+    $('notifPrefsOverlay').classList.add('show');
+  };
+  $('notifPrefsClose').onclick = () => $('notifPrefsOverlay').classList.remove('show');
+  $('notifPrefsOverlay').onclick = (e) => { if (e.target.id === 'notifPrefsOverlay') $('notifPrefsOverlay').classList.remove('show'); };
+
+  // Per-category toggles and priority selects
+  $('notifPrefsGrid').addEventListener('change', (e) => {
+    const cb = e.target.closest('[data-npref]');
+    if (cb) { notifPrefs.cats[cb.dataset.npref].enabled = cb.checked; saveNotifPrefs(); }
+    const sel = e.target.closest('[data-nprio]');
+    if (sel) { notifPrefs.cats[sel.dataset.nprio].priority = sel.value; saveNotifPrefs(); }
+  });
+
+  // Global toggles
+  $('prefSound').onchange = () => { notifPrefs.sound = $('prefSound').checked; saveNotifPrefs(); };
+  $('prefBrowser').onchange = async () => {
+    if ($('prefBrowser').checked && 'Notification' in window && Notification.permission !== 'granted') {
+      const p = await Notification.requestPermission();
+      if (p !== 'granted') { $('prefBrowser').checked = false; toast('Browser notifications denied', 'error'); return; }
+    }
+    notifPrefs.browser = $('prefBrowser').checked;
+    saveNotifPrefs();
+  };
+  $('prefDND').onchange = () => {
+    notifPrefs.dnd = $('prefDND').checked;
+    saveNotifPrefs();
+    toast(notifPrefs.dnd ? '🌙 Do Not Disturb enabled' : '🔔 Notifications resumed');
+  };
+}
+
 /* ---------------- Boot ---------------- */
 wire();
+wireNotifications();
 announcePresence('hello');
 $('timerMinutes').value = Math.round(state.timer.duration / 60);
 render();

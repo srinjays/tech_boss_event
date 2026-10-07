@@ -48,10 +48,46 @@
       <div class="hpill" id="hBroadcast">📡 No broadcast</div>
       <div class="hpill" id="hClock">--:--:--</div>
       <div class="hpill" id="hConsoles" title="Consoles open in other tabs sync live">🖥 1 console</div>
+      <div class="notif-wrap">
+        <button id="notifBell" class="notif-bell" title="Notifications">
+          🔔 <span id="notifBadge" class="notif-badge" hidden>0</span>
+        </button>
+        <div id="notifPanel" class="notif-panel" hidden>
+          <div class="notif-header">
+            <h3>🔔 Notifications</h3>
+            <div class="notif-header-actions">
+              <button id="notifMarkAll" class="btn btn-ghost sm">✓ Mark all read</button>
+              <button id="notifPrefsBtn" class="btn btn-ghost sm" title="Notification preferences">⚙</button>
+              <button id="notifClearAll" class="btn btn-ghost sm">🗑 Clear</button>
+            </div>
+          </div>
+          <div id="notifFilters" class="notif-filters"></div>
+          <ul id="notifList" class="notif-list"></ul>
+          <div class="notif-footer">
+            <span id="notifSummary" class="t-meta"></span>
+            <button id="notifBrowserPerm" class="btn btn-ghost sm" hidden>Enable browser notifications</button>
+          </div>
+        </div>
+      </div>
       <button id="roleBtn" class="role-pill" title="Switch role">👁 Big Boss ▾</button>
       <span data-perm="reset"><button id="resetData" class="btn btn-ghost sm" title="Reset demo data">⟲ Reset</button></span>
     </div>
   </header>
+
+  <!-- Notification preferences modal -->
+  <div id="notifPrefsOverlay" class="broadcast-overlay" role="dialog">
+    <div class="role-box">
+      <div class="card-head"><h2>⚙ Notification Preferences</h2><button id="notifPrefsClose" class="btn btn-ghost sm">✕</button></div>
+      <p class="t-meta">Choose which events trigger notifications, sound alerts, and browser push notifications.</p>
+      <div id="notifPrefsGrid" class="notif-prefs-grid"></div>
+      <div class="row" style="margin-top:14px">
+        <label class="pref-toggle"><input type="checkbox" id="prefSound" /> 🔊 Sound alerts</label>
+        <label class="pref-toggle"><input type="checkbox" id="prefBrowser" /> 🌐 Browser push notifications</label>
+        <label class="pref-toggle"><input type="checkbox" id="prefDND" /> 🌙 Do Not Disturb</label>
+      </div>
+      <small class="hint">Preferences are saved per browser tab session.</small>
+    </div>
+  </div>
 
   <div id="ticker" class="ticker"><div class="ticker-inner" id="tickerInner">Welcome to the Tech House. Big Boss is watching.</div></div>
 
@@ -218,6 +254,8 @@
   </main>
 
   <div id="toasts" class="toasts"></div>
+
+  <!-- Audio for notification sounds (generated via Web Audio API, these are fallback silent sources) -->
   <script src="app.js"></script>
 </body>
 </html>
